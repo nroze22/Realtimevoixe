@@ -12,11 +12,13 @@ import {
   LANGUAGES_BY_CODE,
 } from '@rtv/shared';
 import { AudioEngine } from '@/lib/audio-engine';
+import { LevelTester } from '@/lib/level-tester';
 import { LivekitPublisher } from '@/lib/livekit-publisher';
-import { operatorWsUrl } from '@/lib/orchestrator';
+import { operatorWsUrl, recordingHref } from '@/lib/orchestrator';
 
 interface StoredService {
   config: ServiceConfig;
+  joinCode: string;
   livekit: { url: string; roomName: string; operatorToken: string };
 }
 
@@ -38,14 +40,22 @@ export default function OperatorConsole() {
   const [capWarning, setCapWarning] = useState<number | null>(null);
   const [capReached, setCapReached] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [listeners, setListeners] = useState<{ byLanguage: Record<string, number>; total: number }>({
+    byLanguage: {},
+    total: 0,
+  });
 
   const engineRef = useRef<AudioEngine | null>(null);
   const publisherRef = useRef<LivekitPublisher | null>(null);
+  const levelTesterRef = useRef<LevelTester | null>(null);
+  const [inputLevel, setInputLevel] = useState({ rms: 0, peak: 0 });
+  const [testing, setTesting] = useState(false);
 
   const listenerUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
-    return `${window.location.origin}/listen/${serviceId}`;
-  }, [serviceId]);
+    const code = stored?.joinCode ?? serviceId;
+    return `${window.location.origin}/listen/${code}`;
+  }, [serviceId, stored?.joinCode]);
 
   // ---------- Load service config from session ----------
   useEffect(() => {
@@ -89,6 +99,7 @@ export default function OperatorConsole() {
         }
       },
       onMessage: handleMessage,
+      onInputLevel: (rms) => setInputLevel((prev) => ({ rms, peak: Math.max(prev.peak * 0.97, rms) })),
     });
     engineRef.current = engine;
 
@@ -124,6 +135,9 @@ export default function OperatorConsole() {
         break;
       case 'cap.reached':
         setCapReached(true);
+        break;
+      case 'listener.count':
+        setListeners({ byLanguage: msg.byLanguage, total: msg.total });
         break;
       case 'log':
         setLogs((prev) => [
@@ -173,9 +187,30 @@ export default function OperatorConsole() {
     await engineRef.current?.close();
   }
 
+  async function toggleTest() {
+    if (testing) {
+      await levelTesterRef.current?.stop();
+      levelTesterRef.current = null;
+      setTesting(false);
+      setInputLevel({ rms: 0, peak: 0 });
+      return;
+    }
+    try {
+      const tester = new LevelTester();
+      await tester.start(selectedDevice || null, (rms, peak) =>
+        setInputLevel((prev) => ({ rms, peak: Math.max(prev.peak * 0.96, peak) })),
+      );
+      levelTesterRef.current = tester;
+      setTesting(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   useEffect(() => () => {
     void publisherRef.current?.disconnect();
     void engineRef.current?.close();
+    void levelTesterRef.current?.stop();
   }, []);
 
   // ---------- Render ----------
@@ -234,7 +269,12 @@ export default function OperatorConsole() {
             </div>
             <div className="flex gap-2">
               {phase === 'setup' || phase === 'stopped' ? (
-                <button onClick={onGoLive} className="btn btn-primary">Go live</button>
+                <>
+                  <button onClick={toggleTest} className="btn btn-ghost">
+                    {testing ? 'Stop test' : 'Test mic'}
+                  </button>
+                  <button onClick={onGoLive} className="btn btn-primary">Go live</button>
+                </>
               ) : phase === 'live' ? (
                 <>
                   <button onClick={onPause} className="btn btn-warn">Pause</button>
@@ -247,6 +287,10 @@ export default function OperatorConsole() {
                 </>
               ) : null}
             </div>
+          </div>
+
+          <div className="mt-4">
+            <LevelMeter rms={inputLevel.rms} peak={inputLevel.peak} active={testing || phase === 'live'} />
           </div>
 
           {capReached && (
@@ -294,15 +338,70 @@ export default function OperatorConsole() {
 
         <div className="card">
           <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-2">
-            Listener link
+            Listeners
           </h2>
-          <div className="rounded-md bg-white p-3 inline-block">
-            <QRCodeSVG value={listenerUrl} size={196} />
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-semibold tabular-nums">{listeners.total}</span>
+            <span className="text-xs text-ink-500">connected</span>
+          </div>
+          {Object.keys(listeners.byLanguage).length > 0 ? (
+            <ul className="mt-3 space-y-1 text-xs text-ink-300">
+              {targetLangs.map((l) => (
+                <li key={l} className="flex justify-between">
+                  <span>{LANGUAGES_BY_CODE[l].englishName}</span>
+                  <span className="tabular-nums text-ink-200">
+                    {listeners.byLanguage[l] ?? 0}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-xs text-ink-600">No listeners yet.</p>
+          )}
+        </div>
+
+        <div className="card">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-2">
+            Join code
+          </h2>
+          <div className="font-mono text-2xl tracking-widest text-ink-50">
+            {stored.joinCode}
+          </div>
+          <p className="mt-1 text-xs text-ink-500">
+            Read it from the platform; ushers can enter it on the listener page.
+          </p>
+          <div className="rounded-md bg-white p-3 inline-block mt-4">
+            <QRCodeSVG value={listenerUrl} size={180} />
           </div>
           <p className="mt-3 text-xs text-ink-400 break-all">{listenerUrl}</p>
           <a href={listenerUrl} target="_blank" rel="noreferrer" className="btn btn-ghost mt-3 w-full">
             Open listener page
           </a>
+        </div>
+
+        <div className="card">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-3">
+            Recordings
+          </h2>
+          <p className="text-xs text-ink-500 mb-3">
+            Available while the service is live and for ~1 minute after stop.
+          </p>
+          <div className="grid gap-2 text-xs">
+            <DownloadRow
+              label={`Source · ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`}
+              srtHref={recordingHref(serviceId, cfg.sourceLanguage, 'srt')}
+              vttHref={recordingHref(serviceId, cfg.sourceLanguage, 'vtt')}
+            />
+            {targetLangs.map((l) => (
+              <DownloadRow
+                key={l}
+                label={LANGUAGES_BY_CODE[l].englishName}
+                wavHref={recordingHref(serviceId, l, 'wav')}
+                srtHref={recordingHref(serviceId, l, 'srt')}
+                vttHref={recordingHref(serviceId, l, 'vtt')}
+              />
+            ))}
+          </div>
         </div>
 
         <div className="card">
@@ -322,6 +421,69 @@ export default function OperatorConsole() {
 }
 
 // ---------- Subcomponents ----------
+
+function DownloadRow({
+  label, wavHref, srtHref, vttHref,
+}: {
+  label: string; wavHref?: string; srtHref?: string; vttHref?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-b border-ink-800 last:border-0 py-1.5">
+      <span className="text-ink-300 truncate">{label}</span>
+      <div className="flex items-center gap-2">
+        {wavHref && (
+          <a className="text-accent hover:underline" href={wavHref} target="_blank" rel="noreferrer">
+            wav
+          </a>
+        )}
+        {srtHref && (
+          <a className="text-ink-300 hover:text-ink-100 hover:underline" href={srtHref} target="_blank" rel="noreferrer">
+            srt
+          </a>
+        )}
+        {vttHref && (
+          <a className="text-ink-300 hover:text-ink-100 hover:underline" href={vttHref} target="_blank" rel="noreferrer">
+            vtt
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LevelMeter({ rms, peak, active }: { rms: number; peak: number; active: boolean }) {
+  const dbfs = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+  const pct = !active ? 0 : Math.max(0, Math.min(100, ((dbfs + 60) / 60) * 100));
+  const peakDb = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
+  const peakPct = !active ? 0 : Math.max(0, Math.min(100, ((peakDb + 60) / 60) * 100));
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1 text-[10px] uppercase tracking-wider text-ink-500">
+        <span>Input level</span>
+        <span className="tabular-nums">
+          {active
+            ? `${dbfs === -Infinity ? '−∞' : dbfs.toFixed(0)} dBFS · peak ${peakDb === -Infinity ? '−∞' : peakDb.toFixed(0)} dB`
+            : 'idle'}
+        </span>
+      </div>
+      <div className="relative h-2 overflow-hidden rounded-full bg-ink-800">
+        <div
+          className={`absolute inset-y-0 left-0 transition-[width] duration-75 ${
+            pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-emerald-500' : pct > 30 ? 'bg-emerald-500/80' : 'bg-emerald-600/50'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+        <div className="absolute inset-y-0 w-[2px] bg-amber-300/80" style={{ left: `${peakPct}%` }} />
+      </div>
+      {active && dbfs < -45 && (
+        <p className="mt-1 text-[10px] text-amber-300">Signal looks quiet — check console aux send gain.</p>
+      )}
+      {active && peakDb > -3 && (
+        <p className="mt-1 text-[10px] text-red-300">Peaks near clipping — pull the aux send down a few dB.</p>
+      )}
+    </div>
+  );
+}
 
 function PhaseBadge({ phase, conn }: { phase: string; conn: Conn }) {
   const dot =

@@ -49,3 +49,11 @@ export async function fetchListenerToken(
 export function operatorWsUrl(serviceId: string): string {
   return `${WS}/ws/operator/${encodeURIComponent(serviceId)}`;
 }
+
+export function recordingHref(
+  serviceId: string,
+  lang: string,
+  ext: 'wav' | 'srt' | 'vtt',
+): string {
+  return `${HTTP}/services/${encodeURIComponent(serviceId)}/recordings/${encodeURIComponent(lang)}.${ext}`;
+}

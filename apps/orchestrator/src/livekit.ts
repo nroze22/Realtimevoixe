@@ -66,3 +66,28 @@ export async function deleteRoom(roomName: string): Promise<void> {
     // ignore
   }
 }
+
+/**
+ * Returns listener counts per language, derived from each participant's
+ * metadata ({"role":"listener","language":"es"}). Operators are excluded.
+ */
+export async function listenerCounts(
+  roomName: string,
+): Promise<{ byLanguage: Record<string, number>; total: number }> {
+  const byLanguage: Record<string, number> = {};
+  let total = 0;
+  try {
+    const participants = await roomService().listParticipants(roomName);
+    for (const p of participants) {
+      if (!p.metadata) continue;
+      let meta: { role?: string; language?: string } = {};
+      try { meta = JSON.parse(p.metadata); } catch {/* noop */}
+      if (meta.role !== 'listener' || !meta.language) continue;
+      byLanguage[meta.language] = (byLanguage[meta.language] ?? 0) + 1;
+      total += 1;
+    }
+  } catch {
+    // ignore — room may not exist yet.
+  }
+  return { byLanguage, total };
+}

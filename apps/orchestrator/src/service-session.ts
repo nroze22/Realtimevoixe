@@ -15,6 +15,8 @@ import {
 } from '@rtv/shared';
 import { TranslateSession } from './realtime-session.js';
 import { env } from './env.js';
+import { listenerCounts } from './livekit.js';
+import { ServiceRecorder } from './recorder.js';
 import { log } from './log.js';
 
 /**
@@ -36,13 +38,19 @@ export class ServiceSession extends EventEmitter {
   private operatorSocket: FastifyWS | null = null;
   private startedAt = 0;
   private costInterval: NodeJS.Timeout | null = null;
+  private listenerInterval: NodeJS.Timeout | null = null;
   private lastCaptionByLang = new Map<LanguageCode, string>();
   private warnedAt: number[] = [];
   /** Only the first opened session emits source-language captions. */
   private sourceCaptionsOwner: LanguageCode | null = null;
   private sourceBuffer = '';
+  public readonly recorder: ServiceRecorder;
 
-  constructor(public readonly config: ServiceConfig, livekitRoomName: string) {
+  constructor(
+    public readonly config: ServiceConfig,
+    livekitRoomName: string,
+    joinCode: string,
+  ) {
     super();
     this.state = {
       config,
@@ -50,10 +58,20 @@ export class ServiceSession extends EventEmitter {
       startedAt: null,
       endedAt: null,
       livekitRoomName,
+      joinCode,
       costUSD: 0,
       capReached: false,
+      listenersByLanguage: {},
+      totalListeners: 0,
       errorMessage: null,
     };
+    this.recorder = new ServiceRecorder(config.serviceId);
+  }
+
+  setListenerCounts(byLanguage: Record<string, number>, total: number): void {
+    this.state.listenersByLanguage = byLanguage;
+    this.state.totalListeners = total;
+    this.sendToOperator({ type: 'listener.count', byLanguage, total });
   }
 
   attachOperator(socket: FastifyWS): void {
@@ -78,7 +96,15 @@ export class ServiceSession extends EventEmitter {
     }
 
     this.costInterval = setInterval(() => this.publishCost(), 1000);
+    this.listenerInterval = setInterval(() => void this.pollListeners(), 5000);
+    void this.pollListeners();
     this.transition('live');
+  }
+
+  private async pollListeners(): Promise<void> {
+    if (this.state.status === 'stopped' || this.state.status === 'stopping') return;
+    const counts = await listenerCounts(this.state.livekitRoomName);
+    this.setListenerCounts(counts.byLanguage, counts.total);
   }
 
   async openLanguage(lang: LanguageCode): Promise<void> {
@@ -92,6 +118,7 @@ export class ServiceSession extends EventEmitter {
 
     ts.on('audio', (pcm16) => {
       this.sendBinaryToOperator(lang, pcm16);
+      this.recorder.appendAudio(lang, pcm16);
     });
 
     ts.on('text', (delta, isFinal) => {
@@ -100,6 +127,7 @@ export class ServiceSession extends EventEmitter {
       const text = isFinal ? prev : prev + delta;
       if (isFinal) {
         this.lastCaptionByLang.set(lang, '');
+        this.recorder.appendCaption('target', lang, this.now(), prev);
       } else {
         this.lastCaptionByLang.set(lang, text);
       }
@@ -117,6 +145,7 @@ export class ServiceSession extends EventEmitter {
       if (this.sourceCaptionsOwner !== lang) return;
       if (isFinal) {
         this.sourceBuffer = '';
+        this.recorder.appendCaption('source', this.config.sourceLanguage as LanguageCode, this.now(), delta);
         const frame: CaptionFrame = {
           kind: 'source',
           language: this.config.sourceLanguage as LanguageCode,
@@ -186,6 +215,10 @@ export class ServiceSession extends EventEmitter {
     if (this.costInterval) {
       clearInterval(this.costInterval);
       this.costInterval = null;
+    }
+    if (this.listenerInterval) {
+      clearInterval(this.listenerInterval);
+      this.listenerInterval = null;
     }
     for (const ts of this.sessions.values()) ts.close();
     this.sessions.clear();

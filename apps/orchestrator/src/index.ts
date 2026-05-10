@@ -64,7 +64,7 @@ async function main() {
   fastify.post('/listener-token', async (req, reply) => {
     const parsed = ListenerTokenSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid' });
-    const session = registry.get(parsed.data.serviceId);
+    const session = registry.resolve(parsed.data.serviceId);
     if (!session) return reply.code(404).send({ error: 'service_not_found' });
 
     const identity = parsed.data.listenerId ?? `listener-${crypto.randomUUID()}`;
@@ -87,9 +87,56 @@ async function main() {
 
   fastify.get('/services/:serviceId', async (req, reply) => {
     const { serviceId } = req.params as { serviceId: string };
-    const session = registry.get(serviceId);
+    const session = registry.resolve(serviceId);
     if (!session) return reply.code(404).send({ error: 'not_found' });
     return { service: session.state };
+  });
+
+  /** List downloadable recording assets for a service. */
+  fastify.get('/services/:serviceId/recordings', async (req, reply) => {
+    const { serviceId } = req.params as { serviceId: string };
+    const session = registry.resolve(serviceId);
+    if (!session) return reply.code(404).send({ error: 'not_found' });
+    const langs = session.recorder.listLanguages();
+    return {
+      sourceLanguage: session.state.config.sourceLanguage,
+      targetLanguages: langs,
+      // Public download URLs are exposed below.
+    };
+  });
+
+  fastify.get('/services/:serviceId/recordings/:lang.wav', async (req, reply) => {
+    const { serviceId, lang } = req.params as { serviceId: string; lang: string };
+    const session = registry.resolve(serviceId);
+    if (!session) return reply.code(404).send({ error: 'not_found' });
+    const wav = await session.recorder.wavFor(lang as any);
+    if (!wav) return reply.code(404).send({ error: 'no_audio' });
+    reply
+      .header('Content-Type', 'audio/wav')
+      .header('Content-Disposition', `attachment; filename="${serviceId}-${lang}.wav"`);
+    return reply.send(wav);
+  });
+
+  fastify.get('/services/:serviceId/recordings/:lang.srt', async (req, reply) => {
+    const { serviceId, lang } = req.params as { serviceId: string; lang: string };
+    const session = registry.resolve(serviceId);
+    if (!session) return reply.code(404).send({ error: 'not_found' });
+    const srt = session.recorder.srtFor(lang === session.state.config.sourceLanguage ? 'source' : (lang as any));
+    reply
+      .header('Content-Type', 'application/x-subrip; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${serviceId}-${lang}.srt"`);
+    return reply.send(srt);
+  });
+
+  fastify.get('/services/:serviceId/recordings/:lang.vtt', async (req, reply) => {
+    const { serviceId, lang } = req.params as { serviceId: string; lang: string };
+    const session = registry.resolve(serviceId);
+    if (!session) return reply.code(404).send({ error: 'not_found' });
+    const vtt = session.recorder.vttFor(lang === session.state.config.sourceLanguage ? 'source' : (lang as any));
+    reply
+      .header('Content-Type', 'text/vtt; charset=utf-8')
+      .header('Content-Disposition', `attachment; filename="${serviceId}-${lang}.vtt"`);
+    return reply.send(vtt);
   });
 
   /**

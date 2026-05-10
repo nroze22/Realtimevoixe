@@ -30,7 +30,11 @@ export interface ServiceState {
   startedAt: number | null;
   endedAt: number | null;
   livekitRoomName: string;
+  /** Short usher-friendly code, e.g. "SVC-7K2L". */
+  joinCode: string;
   costUSD: number;
   capReached: boolean;
+  listenersByLanguage: Record<string, number>;
+  totalListeners: number;
   errorMessage: string | null;
 }

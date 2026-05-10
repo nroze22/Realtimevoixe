@@ -6,6 +6,8 @@ export interface AudioEngineCallbacks {
   onMessage: (msg: OrchestratorMessage) => void;
   onLanguageStream: (lang: LanguageCode, stream: MediaStream) => void;
   onConnectionChange: (state: 'connecting' | 'open' | 'closed' | 'error') => void;
+  /** Reports input RMS in 0..1 range (post-getUserMedia, pre-WS). */
+  onInputLevel?: (rms: number) => void;
 }
 
 interface PlaybackSink {
@@ -23,8 +25,13 @@ interface PlaybackSink {
  */
 export class AudioEngine {
   private ws: WebSocket | null = null;
+  private wsUrl: string | null = null;
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private captureCtx: AudioContext | null = null;
   private captureNode: AudioWorkletNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private levelRaf: number | null = null;
   private mediaStream: MediaStream | null = null;
   private sinks = new Map<LanguageCode, PlaybackSink>();
   private closed = false;
@@ -34,6 +41,7 @@ export class AudioEngine {
   // ---------- Lifecycle ----------
 
   async connect(wsUrl: string): Promise<void> {
+    this.wsUrl = wsUrl;
     this.cb.onConnectionChange('connecting');
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
@@ -41,10 +49,11 @@ export class AudioEngine {
 
     await new Promise<void>((resolve, reject) => {
       ws.onopen = () => {
+        this.reconnectAttempts = 0;
         this.cb.onConnectionChange('open');
         resolve();
       };
-      ws.onerror = (err) => {
+      ws.onerror = () => {
         this.cb.onConnectionChange('error');
         reject(new Error('orchestrator ws error'));
       };
@@ -53,7 +62,33 @@ export class AudioEngine {
     ws.onmessage = (event) => this.handleWs(event);
     ws.onclose = () => {
       this.cb.onConnectionChange('closed');
+      this.scheduleReconnect();
     };
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || !this.wsUrl) return;
+    if (this.reconnectTimer) return;
+    const attempt = ++this.reconnectAttempts;
+    const delay = Math.min(15_000, 500 * Math.pow(2, attempt - 1));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed || !this.wsUrl) return;
+      this.cb.onConnectionChange('connecting');
+      const ws = new WebSocket(this.wsUrl);
+      ws.binaryType = 'arraybuffer';
+      this.ws = ws;
+      ws.onopen = () => {
+        this.reconnectAttempts = 0;
+        this.cb.onConnectionChange('open');
+      };
+      ws.onmessage = (event) => this.handleWs(event);
+      ws.onerror = () => this.cb.onConnectionChange('error');
+      ws.onclose = () => {
+        this.cb.onConnectionChange('closed');
+        this.scheduleReconnect();
+      };
+    }, delay);
   }
 
   send(msg: OperatorMessage): void {
@@ -87,10 +122,36 @@ export class AudioEngine {
     };
     src.connect(node);
 
+    // Branch off an AnalyserNode for the level meter — runs entirely in the
+    // browser and never touches the WS.
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.6;
+    src.connect(analyser);
+    this.analyser = analyser;
+    this.startLevelLoop();
+
     this.captureCtx = ctx;
     this.captureNode = node;
 
     this.send({ type: 'audio.meta', sampleRate: 16000, channels: 1, codec: 'pcm16' });
+  }
+
+  private startLevelLoop(): void {
+    if (!this.cb.onInputLevel || !this.analyser) return;
+    const buf = new Float32Array(this.analyser.fftSize);
+    const tick = () => {
+      if (this.closed || !this.analyser) return;
+      this.analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i]! * buf[i]!;
+      const rms = Math.sqrt(sum / buf.length);
+      this.cb.onInputLevel!(rms);
+      this.levelRaf = (typeof requestAnimationFrame !== 'undefined'
+        ? requestAnimationFrame(tick)
+        : (setTimeout(tick, 50) as unknown as number));
+    };
+    tick();
   }
 
   async ensureSink(lang: LanguageCode): Promise<MediaStream> {
@@ -116,6 +177,17 @@ export class AudioEngine {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.levelRaf !== null) {
+      try {
+        if (typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(this.levelRaf);
+        else clearTimeout(this.levelRaf);
+      } catch {/* noop */}
+      this.levelRaf = null;
+    }
     try {
       this.captureNode?.disconnect();
     } catch {/* noop */}

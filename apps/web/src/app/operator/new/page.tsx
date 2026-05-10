@@ -58,6 +58,7 @@ export default function NewServicePage() {
         `service:${serviceId}`,
         JSON.stringify({
           config: created.service.config,
+          joinCode: created.service.joinCode,
           livekit: created.livekit,
         }),
       );
