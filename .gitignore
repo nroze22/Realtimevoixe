@@ -30,3 +30,6 @@ Thumbs.db
 # Temp
 tmp/
 *.tmp
+
+# TypeScript incremental cache
+*.tsbuildinfo
