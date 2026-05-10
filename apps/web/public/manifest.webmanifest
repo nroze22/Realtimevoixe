@@ -1,0 +1,23 @@
+{
+  "name": "Realtime Voice — Live church translation",
+  "short_name": "RTV",
+  "description": "Live AI translation of worship services in any language.",
+  "start_url": "/listen",
+  "display": "standalone",
+  "background_color": "#0c0d11",
+  "theme_color": "#0c0d11",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
