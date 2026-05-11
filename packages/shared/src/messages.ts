@@ -15,6 +15,7 @@ export type OperatorMessage =
   | { type: 'pause'; }
   | { type: 'resume'; }
   | { type: 'stop'; }
+  | { type: 'cap.raise'; addUSD: number }
   | { type: 'audio.meta'; sampleRate: number; channels: 1 | 2; codec: 'pcm16' | 'opus' };
 
 // ---- Orchestrator -> Operator (text frames) ----

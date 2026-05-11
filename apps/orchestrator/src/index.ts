@@ -199,6 +199,9 @@ async function main() {
       case 'stop':
         await session.stop();
         break;
+      case 'cap.raise':
+        session.raiseCap(msg.addUSD);
+        break;
       case 'audio.meta':
         // Track expected sample rate, currently informational.
         log.debug({ serviceId, meta: msg }, 'audio meta');

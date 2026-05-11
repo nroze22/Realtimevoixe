@@ -106,6 +106,9 @@ export default function OperatorHomePage() {
               <Eyebrow className="flex items-center gap-1.5">
                 <History className="h-3 w-3" /> Recent services
               </Eyebrow>
+              <Link href="/operator/history" className="text-xs text-accent-300 hover:underline">
+                View all →
+              </Link>
             </div>
             <div className="card-flush overflow-hidden">
               <ul>

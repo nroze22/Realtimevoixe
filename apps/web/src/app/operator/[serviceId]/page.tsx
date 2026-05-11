@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Cable,
   Check,
+  ChevronDown,
   Circle,
   Command,
   DollarSign,
@@ -19,13 +20,14 @@ import {
   Mic,
   NotebookPen,
   Pause as PauseIcon,
+  Pin,
+  PinOff,
   Play,
+  Plus,
   Radio,
   Share2,
-  Signal,
-  SignalLow,
-  SignalMedium,
   Square,
+  Timer,
   UserCircle2,
   Users,
   VolumeX,
@@ -53,6 +55,7 @@ import { CommandPalette, type CommandItem } from '@/components/command-palette';
 import { Logo } from '@/components/logo';
 import { useToast } from '@/components/toast';
 import { getNotes, recordRecent, setNotes } from '@/lib/templates';
+import { EQUIPMENT_PROFILES } from '@/lib/equipment';
 
 interface StoredService {
   config: ServiceConfig;
@@ -63,6 +66,12 @@ interface StoredService {
 type Conn = 'connecting' | 'open' | 'closed' | 'error';
 type Phase = 'setup' | 'live' | 'paused' | 'stopped';
 type Step = 'device' | 'level' | 'share' | 'launch';
+
+interface PinnedMoment {
+  language: string;
+  text: string;
+  tMs: number;
+}
 
 export default function OperatorConsole() {
   const params = useParams<{ serviceId: string }>();
@@ -100,7 +109,16 @@ export default function OperatorConsole() {
   const [notes, setNotesState] = useState('');
   const [endedSummary, setEndedSummary] = useState<null | {
     durationSec: number; costUSD: number; peakListeners: number; listenerMinutes: number;
+    wasRehearsal: boolean;
+    pinned: PinnedMoment[];
   }>(null);
+
+  /** Rehearsal mode flag — same backend session but UI hides the listener path and auto-stops at 60s. */
+  const [rehearsalMode, setRehearsalMode] = useState(false);
+  const [rehearsalSecLeft, setRehearsalSecLeft] = useState(60);
+
+  /** Pinned moments — captions starred during the service for the report. */
+  const [pinned, setPinned] = useState<PinnedMoment[]>([]);
 
   /** Accumulates listener-minutes for the post-service report. */
   const listenerMinutesRef = useRef(0);
@@ -161,6 +179,22 @@ export default function OperatorConsole() {
     return () => clearInterval(t);
   }, [phase]);
 
+  // Rehearsal countdown — auto-stops at 0.
+  useEffect(() => {
+    if (!rehearsalMode || phase !== 'live') return;
+    const t = setInterval(() => {
+      setRehearsalSecLeft((s) => {
+        if (s <= 1) {
+          void onStop();
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rehearsalMode, phase]);
+
   useEffect(() => {
     peakListenersRef.current = Math.max(peakListenersRef.current, listeners.total);
 
@@ -198,6 +232,8 @@ export default function OperatorConsole() {
             costUSD: cost?.costUSD ?? 0,
             peakListeners: peakListenersRef.current,
             listenerMinutes: Math.round(listenerMinutesRef.current),
+            wasRehearsal: rehearsalMode,
+            pinned,
           });
         }
         break;
@@ -269,8 +305,11 @@ export default function OperatorConsole() {
   }, [serviceId, stored, handleMessage]);
 
   // ---------- Controls ----------
-  async function onGoLive() {
+  async function onGoLive(rehearsal = false) {
     setError(null);
+    setRehearsalMode(rehearsal);
+    setRehearsalSecLeft(60);
+    setPinned([]);
     try {
       if (!engineRef.current) await connect();
       await engineRef.current!.startCapture(selectedDevice || null);
@@ -282,18 +321,39 @@ export default function OperatorConsole() {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
+
+  function onAddCap(amount: number) {
+    engineRef.current?.send({ type: 'cap.raise', addUSD: amount });
+    toast.success(`+$${amount} added to cost cap`);
+  }
+
+  function onPinMoment(language: string, text: string) {
+    if (!text.trim()) return;
+    setPinned((prev) => {
+      const tMs = elapsedSec * 1000;
+      // Toggle: if the exact same line is already pinned at the same caption, remove.
+      const exists = prev.find((p) => p.language === language && p.text === text);
+      if (exists) return prev.filter((p) => p !== exists);
+      return [...prev, { language, text, tMs }];
+    });
+    toast.success('Moment pinned', text.slice(0, 60));
+  }
   function onPause()  { engineRef.current?.send({ type: 'pause' }); }
   function onResume() { engineRef.current?.send({ type: 'resume' }); }
   async function onStop() {
+    const wasRehearsal = rehearsalMode;
     const summary = {
       durationSec: elapsedSec,
       costUSD: cost?.costUSD ?? 0,
       peakListeners: peakListenersRef.current,
       listenerMinutes: Math.round(listenerMinutesRef.current),
+      wasRehearsal,
+      pinned,
     };
     setEndedSummary(summary);
 
-    if (stored) {
+    // Only record real services (not rehearsals) in history.
+    if (stored && !wasRehearsal) {
       recordRecent({
         serviceId,
         joinCode: stored.joinCode,
@@ -316,6 +376,7 @@ export default function OperatorConsole() {
     engineRef.current = null;
     setInputStream(null);
     setPhase('stopped');
+    setRehearsalMode(false);
   }
 
   async function toggleTest() {
@@ -395,9 +456,14 @@ export default function OperatorConsole() {
         setActiveSpeakerId={setActiveSpeakerId}
         notes={notes}
         setNotes={setNotesState}
+        rehearsalMode={rehearsalMode}
+        rehearsalSecLeft={rehearsalSecLeft}
+        pinned={pinned}
         onPause={onPause}
         onResume={onResume}
         onStop={onStop}
+        onAddCap={onAddCap}
+        onPinMoment={onPinMoment}
         toastSuccess={(t, b) => toast.success(t, b)}
       />
     );
@@ -414,7 +480,16 @@ export default function OperatorConsole() {
         costUSD={endedSummary.costUSD}
         peakListeners={endedSummary.peakListeners}
         listenerMinutes={endedSummary.listenerMinutes}
+        wasRehearsal={endedSummary.wasRehearsal}
+        pinned={endedSummary.pinned}
         notes={notes}
+        onGoLiveForReal={() => {
+          // From rehearsal-complete → real live. Re-render setup, prime to launch.
+          setEndedSummary(null);
+          setPhase('setup');
+          setStep('launch');
+          setRehearsalMode(false);
+        }}
       />
     );
   }
@@ -484,9 +559,9 @@ export default function OperatorConsole() {
           </select>
           <Hint className="mt-3">
             Take a balanced cable from any <strong className="text-ink-200">post-EQ mono aux send</strong> on your mixer
-            (X32/M32/Yamaha/A&amp;H/StudioLive) into a USB audio interface, then pick that
-            interface above.
+            into a USB audio interface, then pick that interface above.
           </Hint>
+          <EquipmentProfiles />
         </WizardStep>
 
         <WizardStep
@@ -601,9 +676,31 @@ export default function OperatorConsole() {
               {error}
             </div>
           )}
-          <Button variant="primary" size="lg" onClick={onGoLive} disabled={!allReady} className="w-full mt-5" icon={Radio}>
-            Go live now
-          </Button>
+          <div className="mt-5 grid gap-3 sm:grid-cols-[1fr_1fr]">
+            <Button
+              variant="ghost"
+              size="lg"
+              onClick={() => void onGoLive(true)}
+              disabled={!allReady}
+              icon={Timer}
+              className="w-full"
+            >
+              Run 60-sec rehearsal
+            </Button>
+            <Button
+              variant="primary"
+              size="lg"
+              onClick={() => void onGoLive(false)}
+              disabled={!allReady}
+              icon={Radio}
+              className="w-full"
+            >
+              Go live now
+            </Button>
+          </div>
+          <p className="mt-2 text-[10px] text-ink-500 text-center">
+            Rehearsal won&apos;t share a join code or count toward your history. Costs a couple cents.
+          </p>
         </WizardStep>
       </ol>
     </main>
@@ -638,9 +735,14 @@ function OnAir(props: {
   setActiveSpeakerId: (id: string) => void;
   notes: string;
   setNotes: (v: string) => void;
+  rehearsalMode: boolean;
+  rehearsalSecLeft: number;
+  pinned: PinnedMoment[];
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
+  onAddCap: (amount: number) => void;
+  onPinMoment: (language: string, text: string) => void;
   toastSuccess: (title: string, body?: string) => void;
 }) {
   const {
@@ -648,7 +750,8 @@ function OnAir(props: {
     capReached, capWarning, listeners, captionsByLang, historyByLang,
     inputLevel, inputStream, outputStreams, serviceId, cmdOpen, setCmdOpen,
     activeSpeakerId, setActiveSpeakerId, notes, setNotes,
-    onPause, onResume, onStop, toastSuccess,
+    rehearsalMode, rehearsalSecLeft, pinned,
+    onPause, onResume, onStop, onAddCap, onPinMoment, toastSuccess,
   } = props;
 
   // Smart silence detection — input RMS below threshold for 5+ seconds.
@@ -746,13 +849,20 @@ function OnAir(props: {
       <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-ink-950/85 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-5 py-3 flex items-center gap-4">
           <Logo size={18} />
-          <PhasePill
-            tone={phase === 'live' ? 'live' : 'paused'}
-            label={phase === 'live' ? 'ON AIR' : 'PAUSED'}
-            pulse={phase === 'live'}
-          />
+          {rehearsalMode ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold tracking-wide text-amber-100">
+              <Timer className="h-3.5 w-3.5" />
+              REHEARSAL · {rehearsalSecLeft}s
+            </span>
+          ) : (
+            <PhasePill
+              tone={phase === 'live' ? 'live' : 'paused'}
+              label={phase === 'live' ? 'ON AIR' : 'PAUSED'}
+              pulse={phase === 'live'}
+            />
+          )}
           <span className="readout text-sm text-ink-300">{fmtElapsed(elapsedSec)}</span>
-          {isSilent && (
+          {isSilent && !rehearsalMode && (
             <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-100">
               <VolumeX className="h-3 w-3" />
               Silent · {silentSec}s
@@ -817,6 +927,8 @@ function OnAir(props: {
                 listeners={listeners.byLanguage[lang] ?? 0}
                 stream={outputStreams[lang] ?? null}
                 active={phase === 'live'}
+                onPin={(text) => onPinMoment(lang, text)}
+                pinnedCount={pinned.filter((p) => p.language === lang).length}
               />
             ))}
           </div>
@@ -824,18 +936,34 @@ function OnAir(props: {
 
         {/* Sidebar */}
         <aside className="grid gap-5 content-start">
-          <Stat
-            label="Cost"
-            icon={DollarSign}
-            value={<AnimatedNumber value={cost?.costUSD ?? 0} prefix="$" decimals={2} />}
-            sub={cost ? `cap $${cfg.costCapUSD.toFixed(0)} · ${cost.burnPerMinuteUSD.toFixed(2)}/min burn` : 'estimating…'}
-            progress={cost ? Math.round(cost.capFraction * 100) : 0}
-            progressTone={
-              cost && cost.capFraction > 0.9 ? 'danger'
-              : cost && cost.capFraction > 0.6 ? 'warn'
-              : 'good'
-            }
-          />
+          <div>
+            <Stat
+              label="Cost"
+              icon={DollarSign}
+              value={<AnimatedNumber value={cost?.costUSD ?? 0} prefix="$" decimals={2} />}
+              sub={cost ? `cap $${cfg.costCapUSD.toFixed(0)} · ${cost.burnPerMinuteUSD.toFixed(2)}/min burn` : 'estimating…'}
+              progress={cost ? Math.round(cost.capFraction * 100) : 0}
+              progressTone={
+                cost && cost.capFraction > 0.9 ? 'danger'
+                : cost && cost.capFraction > 0.6 ? 'warn'
+                : 'good'
+              }
+            />
+            {!rehearsalMode && (
+              <div className="mt-2 flex items-center gap-1.5">
+                <span className="text-[10px] uppercase tracking-[0.16em] text-ink-500 mr-1">Top up cap</span>
+                {[10, 20, 50].map((amt) => (
+                  <button
+                    key={amt}
+                    onClick={() => onAddCap(amt)}
+                    className="inline-flex items-center gap-1 rounded-md border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[11px] text-ink-300 hover:bg-white/[0.06] hover:border-white/[0.12] transition"
+                  >
+                    <Plus className="h-3 w-3" />${amt}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <Stat
             label="Listeners"
             icon={Users}
@@ -853,43 +981,81 @@ function OnAir(props: {
             </div>
           </div>
 
-          <div className="card relative overflow-hidden">
-            <div className="absolute -top-12 -right-12 h-32 w-32 rounded-full bg-accent-700/15 blur-2xl pointer-events-none" aria-hidden />
-            <Eyebrow className="mb-2 flex items-center gap-1.5 relative">
-              <Share2 className="h-3 w-3 text-ink-500" /> Share
-            </Eyebrow>
-            <div className="flex items-center gap-2 relative">
-              <div className="font-mono text-2xl tracking-[0.22em] text-ink-50">{joinCode}</div>
-              <CopyButton value={joinCode} label="" compact />
+          {rehearsalMode ? (
+            <div className="card border-amber-500/30 bg-amber-500/5">
+              <Eyebrow className="mb-2 flex items-center gap-1.5">
+                <Timer className="h-3 w-3 text-amber-300" /> Rehearsal
+              </Eyebrow>
+              <p className="text-sm text-ink-200 leading-relaxed">
+                Listener access is hidden during rehearsal. Speak into the mic for ~30 seconds,
+                listen to the translated audio, and confirm everything sounds right.
+              </p>
+              <button
+                onClick={onStop}
+                className="btn btn-ghost mt-3 w-full text-xs"
+              >
+                End rehearsal early
+              </button>
             </div>
-            <div className="rounded-lg bg-white p-2 inline-block mt-3 relative">
-              <QRCodeSVG value={listenerUrl} size={148} />
+          ) : (
+            <div className="card relative overflow-hidden">
+              <div className="absolute -top-12 -right-12 h-32 w-32 rounded-full bg-accent-700/15 blur-2xl pointer-events-none" aria-hidden />
+              <Eyebrow className="mb-2 flex items-center gap-1.5 relative">
+                <Share2 className="h-3 w-3 text-ink-500" /> Share
+              </Eyebrow>
+              <div className="flex items-center gap-2 relative">
+                <div className="font-mono text-2xl tracking-[0.22em] text-ink-50">{joinCode}</div>
+                <CopyButton value={joinCode} label="" compact />
+              </div>
+              <div className="rounded-lg bg-white p-2 inline-block mt-3 relative">
+                <QRCodeSVG value={listenerUrl} size={148} />
+              </div>
+              <a href={listenerUrl} target="_blank" rel="noreferrer"
+                 className="btn btn-ghost mt-3 w-full text-xs relative">
+                <ExternalLink className="h-3 w-3" /> Open listener page
+              </a>
             </div>
-            <a href={listenerUrl} target="_blank" rel="noreferrer"
-               className="btn btn-ghost mt-3 w-full text-xs relative">
-              <ExternalLink className="h-3 w-3" /> Open listener page
-            </a>
-          </div>
+          )}
 
-          <div className="card">
-            <Eyebrow className="mb-2 flex items-center gap-1.5">
-              <Headphones className="h-3 w-3 text-ink-500" /> Headset broadcast
-            </Eyebrow>
-            <ul className="grid gap-1">
-              {targetLangs.map((l) => (
-                <li key={l} className="flex items-center justify-between gap-2 py-1 border-b border-ink-800/60 last:border-0">
-                  <span className="text-xs text-ink-300 truncate">{LANGUAGES_BY_CODE[l].englishName}</span>
-                  <a target="_blank" rel="noreferrer" href={`/broadcast/${joinCode}/${l}`}
-                     className="text-[11px] text-accent-300 hover:underline inline-flex items-center gap-1">
-                    open <ExternalLink className="h-3 w-3" />
-                  </a>
-                </li>
-              ))}
-            </ul>
-            <Hint className="mt-2 !text-[10px]">
-              Pin a page on a laptop wired into your FM/IR transmitter.
-            </Hint>
-          </div>
+          {!rehearsalMode && (
+            <div className="card">
+              <Eyebrow className="mb-2 flex items-center gap-1.5">
+                <Headphones className="h-3 w-3 text-ink-500" /> Headset broadcast
+              </Eyebrow>
+              <ul className="grid gap-1">
+                {targetLangs.map((l) => (
+                  <li key={l} className="flex items-center justify-between gap-2 py-1 border-b border-ink-800/60 last:border-0">
+                    <span className="text-xs text-ink-300 truncate">{LANGUAGES_BY_CODE[l].englishName}</span>
+                    <a target="_blank" rel="noreferrer" href={`/broadcast/${joinCode}/${l}`}
+                       className="text-[11px] text-accent-300 hover:underline inline-flex items-center gap-1">
+                      open <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </li>
+                ))}
+              </ul>
+              <Hint className="mt-2 !text-[10px]">
+                Pin a page on a laptop wired into your FM/IR transmitter.
+              </Hint>
+            </div>
+          )}
+
+          {pinned.length > 0 && (
+            <div className="card">
+              <Eyebrow className="mb-2 flex items-center gap-1.5">
+                <Pin className="h-3 w-3 text-accent-300" /> Pinned moments · {pinned.length}
+              </Eyebrow>
+              <ul className="grid gap-1.5 text-xs max-h-44 overflow-auto scroll-soft">
+                {pinned.slice().reverse().map((p, i) => (
+                  <li key={i} className="border-l-2 border-accent-700/60 pl-2">
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">
+                      {LANGUAGES_BY_CODE[p.language as LanguageCode]?.englishName ?? p.language} · {fmtElapsed(Math.floor(p.tMs / 1000))}
+                    </div>
+                    <div className="text-ink-200 leading-snug mt-0.5">{p.text}</div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* Speaker switcher */}
           {speakerOptions.length > 1 && (
@@ -1037,7 +1203,8 @@ function SourceCaption({
 // ============================================================================
 
 function EndedSummary({
-  cfg, joinCode, serviceId, targetLangs, durationSec, costUSD, peakListeners, listenerMinutes, notes,
+  cfg, joinCode, serviceId, targetLangs, durationSec, costUSD, peakListeners,
+  listenerMinutes, notes, wasRehearsal, pinned, onGoLiveForReal,
 }: {
   cfg: ServiceConfig;
   joinCode: string;
@@ -1048,10 +1215,23 @@ function EndedSummary({
   peakListeners: number;
   listenerMinutes: number;
   notes: string;
+  wasRehearsal: boolean;
+  pinned: PinnedMoment[];
+  onGoLiveForReal: () => void;
 }) {
   const costPerListenerMin = listenerMinutes > 0 ? costUSD / listenerMinutes : null;
 
   const reportBody = useMemo(() => {
+    const pinnedSection = pinned.length > 0
+      ? [
+          `Pinned moments:`,
+          ...pinned.map((p) => {
+            const lang = LANGUAGES_BY_CODE[p.language as LanguageCode]?.englishName ?? p.language;
+            return `  [${fmtElapsed(Math.floor(p.tMs / 1000))}] (${lang}) ${p.text}`;
+          }),
+          ``,
+        ]
+      : [];
     const lines = [
       `Service: ${cfg.title}`,
       cfg.pastorName ? `Speaker: ${cfg.pastorName}` : '',
@@ -1064,12 +1244,40 @@ function EndedSummary({
       `Cost: $${costUSD.toFixed(2)} (cap $${cfg.costCapUSD})`,
       costPerListenerMin ? `Cost / listener-minute: $${costPerListenerMin.toFixed(4)}` : '',
       ``,
+      ...pinnedSection,
       notes ? `Notes:\n${notes}` : '',
     ].filter(Boolean);
     return lines.join('\n');
-  }, [cfg, durationSec, peakListeners, listenerMinutes, costUSD, costPerListenerMin, notes, targetLangs]);
+  }, [cfg, durationSec, peakListeners, listenerMinutes, costUSD, costPerListenerMin, notes, targetLangs, pinned]);
 
   const mailto = `mailto:?subject=${encodeURIComponent(`Service report: ${cfg.title}`)}&body=${encodeURIComponent(reportBody)}`;
+
+  if (wasRehearsal) {
+    return (
+      <main className="mx-auto max-w-2xl px-5 py-10 md:py-14 animate-fade-in">
+        <span className="chip mb-5 border-amber-500/40 bg-amber-500/10 text-amber-100">
+          <Timer className="h-3 w-3" /> Rehearsal complete
+        </span>
+        <h1 className="text-3xl md:text-4xl font-semibold tracking-tightish">
+          Sound check passed.
+        </h1>
+        <p className="mt-2 text-ink-400 text-pretty">
+          Ran for {fmtElapsed(durationSec)} · spent ${costUSD.toFixed(2)}.
+          Translated audio worked end-to-end. Ready to go live for real?
+        </p>
+        <div className="mt-7 flex flex-wrap gap-3">
+          <button onClick={onGoLiveForReal} className="btn btn-primary btn-lg">
+            <Radio className="h-5 w-5" /> Go live for real
+          </button>
+          <a href="/operator/new" className="btn btn-ghost">Tweak settings</a>
+          <a href="/operator" className="btn btn-ghost">Operator home</a>
+        </div>
+        <p className="mt-8 text-[11px] text-ink-500">
+          Tip: keep the same setup tab open — your audio device + level test are still good.
+        </p>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto max-w-2xl px-5 py-10 md:py-14 animate-fade-in">
@@ -1117,6 +1325,25 @@ function EndedSummary({
           ))}
         </div>
       </div>
+
+      {pinned.length > 0 && (
+        <div className="card mt-5">
+          <Eyebrow className="mb-2 flex items-center gap-1.5">
+            <Pin className="h-3 w-3 text-accent-300" /> Pinned moments
+          </Eyebrow>
+          <ul className="grid gap-2 text-sm">
+            {pinned.map((p, i) => (
+              <li key={i} className="border-l-2 border-accent-700/60 pl-3 py-0.5">
+                <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">
+                  {LANGUAGES_BY_CODE[p.language as LanguageCode]?.englishName ?? p.language}
+                  {' · '}{fmtElapsed(Math.floor(p.tMs / 1000))}
+                </div>
+                <div className="text-ink-100 leading-snug">{p.text}</div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {notes && (
         <div className="card mt-5">
@@ -1341,6 +1568,56 @@ function LevelMeter({
         <p className="mt-1 text-[10px] text-red-300">Peaks near clipping — pull the aux send down a few dB.</p>
       )}
     </div>
+  );
+}
+
+function EquipmentProfiles() {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <details
+      className="mt-4 rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden"
+      onToggle={(e) => {
+        if (!(e.currentTarget as HTMLDetailsElement).open) setOpenId(null);
+      }}
+    >
+      <summary className="flex items-center gap-2 px-4 py-3 cursor-pointer text-sm text-ink-200 hover:bg-white/[0.03] transition select-none">
+        <Cable className="h-3.5 w-3.5 text-ink-400" />
+        <span>Wiring guide for your gear</span>
+        <ChevronDown className="ml-auto h-3.5 w-3.5 text-ink-500 transition-transform [details[open]>&]:rotate-180" />
+      </summary>
+      <div className="border-t border-white/[0.04] divide-y divide-white/[0.04]">
+        {EQUIPMENT_PROFILES.map((p) => {
+          const isOpen = openId === p.id;
+          return (
+            <div key={p.id}>
+              <button
+                type="button"
+                onClick={() => setOpenId(isOpen ? null : p.id)}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-white/[0.03] transition"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{p.name}</div>
+                  <div className="text-[11px] text-ink-500 truncate">{p.blurb}</div>
+                </div>
+                <ChevronDown className={cn('h-3.5 w-3.5 text-ink-500 transition-transform', isOpen && 'rotate-180')} />
+              </button>
+              {isOpen && (
+                <div className="px-4 pb-3 animate-fade-in">
+                  <ol className="grid gap-1.5 text-xs text-ink-300 list-decimal pl-4 leading-relaxed">
+                    {p.steps.map((s, i) => <li key={i}>{s}</li>)}
+                  </ol>
+                  {p.deviceHint && (
+                    <p className="mt-2 text-[11px] text-ink-500">
+                      Device picker will likely say: <span className="font-mono text-ink-300">{p.deviceHint}</span>
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 

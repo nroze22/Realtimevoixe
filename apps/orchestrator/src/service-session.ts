@@ -220,6 +220,20 @@ export class ServiceSession extends EventEmitter {
     if (this.state.status === 'paused') this.transition('live');
   }
 
+  raiseCap(addUSD: number): void {
+    if (!Number.isFinite(addUSD) || addUSD <= 0) return;
+    const next = Math.min(2000, this.config.costCapUSD + addUSD);
+    if (next === this.config.costCapUSD) return;
+    (this.config as any).costCapUSD = next;
+    // If we were over the cap, allow recovery so the service can resume.
+    if (this.state.capReached && this.state.costUSD < next) {
+      this.state.capReached = false;
+    }
+    this.warnedAt = this.warnedAt.filter((t) => this.state.costUSD / next >= t);
+    this.sendToOperator({ type: 'log', level: 'info', message: `Cost cap raised to $${next.toFixed(0)}`, tMs: this.now() });
+    this.transition(this.state.status);
+  }
+
   async stop(): Promise<void> {
     if (this.state.status === 'stopped' || this.state.status === 'stopping') return;
     this.transition('stopping');

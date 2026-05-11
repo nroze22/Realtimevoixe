@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import {
-  AlertTriangle, ArrowLeft, Clock, Headphones, Pause as PauseIcon, Play, RefreshCw,
-  Type, Volume2,
+  AlertTriangle, ArrowLeft, Captions, CaptionsOff, Clock, Headphones,
+  Pause as PauseIcon, Play, RefreshCw, Type, Volume2,
 } from 'lucide-react';
 import {
   LANGUAGES_BY_CODE,
@@ -44,6 +44,7 @@ export default function ListenerPage() {
   const [installEvent, setInstallEvent] = useState<any>(null);
   const [volume, setVolume] = useState(1);
   const [bigText, setBigText] = useState(false);
+  const [captionsOn, setCaptionsOn] = useState(true);
   const [captionStream, setCaptionStream] = useState<MediaStream | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [missedOpen, setMissedOpen] = useState(false);
@@ -74,7 +75,17 @@ export default function ListenerPage() {
     }
     const bt = localStorage.getItem('rtv:bigtext') === '1';
     setBigText(bt);
+    const ct = localStorage.getItem('rtv:captions');
+    if (ct !== null) setCaptionsOn(ct === '1');
   }, [serviceId]);
+
+  function toggleCaptions() {
+    setCaptionsOn((v) => {
+      const next = !v;
+      localStorage.setItem('rtv:captions', next ? '1' : '0');
+      return next;
+    });
+  }
 
   const join = useCallback(async (lang: LanguageCode) => {
     setLanguage(lang);
@@ -335,13 +346,30 @@ export default function ListenerPage() {
             <p className="text-xs text-ink-500">{langMeta.englishName}</p>
           </div>
           <button
+            onClick={toggleCaptions}
+            className={cn(
+              'h-9 w-9 rounded-full border flex items-center justify-center transition',
+              captionsOn
+                ? 'bg-accent text-accent-fg border-accent-500'
+                : 'border-white/[0.06] bg-ink-900/60 text-ink-300 hover:bg-ink-800',
+            )}
+            aria-label="Toggle captions"
+            aria-pressed={captionsOn}
+            title="Toggle captions"
+          >
+            {captionsOn ? <Captions className="h-4 w-4" /> : <CaptionsOff className="h-4 w-4" />}
+          </button>
+          <button
             onClick={toggleBigText}
             className={cn(
-              'h-9 w-9 rounded-full border border-ink-800 flex items-center justify-center transition',
-              bigText ? 'bg-accent text-accent-fg border-accent-500' : 'bg-ink-900/60 text-ink-300 hover:bg-ink-800',
+              'h-9 w-9 rounded-full border flex items-center justify-center transition',
+              bigText
+                ? 'bg-accent text-accent-fg border-accent-500'
+                : 'border-white/[0.06] bg-ink-900/60 text-ink-300 hover:bg-ink-800',
             )}
             aria-label="Toggle big text"
             aria-pressed={bigText}
+            title="Toggle big text"
           >
             <Type className="h-4 w-4" />
           </button>
@@ -380,7 +408,11 @@ export default function ListenerPage() {
         aria-live="polite"
         aria-label="Live translation captions"
       >
-        <CaptionStack captions={captions} big={bigText} phase={phase} />
+        {captionsOn ? (
+          <CaptionStack captions={captions} big={bigText} phase={phase} />
+        ) : (
+          <AudioOnlyHero phase={phase} isPlaying={isPlaying} />
+        )}
       </section>
 
       {/* Bottom control deck */}
@@ -528,6 +560,30 @@ function CaptionStack({
           <ScriptureText text={last.text} />
         </li>
       </ul>
+    </div>
+  );
+}
+
+function AudioOnlyHero({ phase, isPlaying }: { phase: Phase; isPlaying: boolean }) {
+  return (
+    <div className="h-full flex flex-col items-center justify-center text-center gap-4 animate-fade-in">
+      <div className="relative h-20 w-20">
+        <div
+          className={cn(
+            'absolute inset-0 rounded-full bg-accent-900/40',
+            phase === 'listening' && isPlaying && 'animate-pulse-ring',
+          )}
+        />
+        <div className="absolute inset-1 rounded-full bg-ink-900/80 ring-1 ring-white/[0.06] flex items-center justify-center">
+          <Headphones className="h-7 w-7 text-accent-300" />
+        </div>
+      </div>
+      <div className="text-lg font-medium text-ink-100">
+        {phase === 'listening' && isPlaying ? 'Listening live' : phase === 'connecting' ? 'Connecting…' : 'Paused'}
+      </div>
+      <p className="text-sm text-ink-500 max-w-xs text-pretty">
+        Captions are hidden. Turn them on with the <Captions className="inline h-3.5 w-3.5 align-[-2px]" /> button.
+      </p>
     </div>
   );
 }

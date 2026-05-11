@@ -1,6 +1,6 @@
 'use client';
 
-import { Headphones, Users } from 'lucide-react';
+import { Headphones, Pin, Users } from 'lucide-react';
 import { LANGUAGES_BY_CODE, type LanguageCode } from '@rtv/shared';
 import { Waveform } from '@/components/waveform';
 import { cn } from '@/lib/cn';
@@ -15,6 +15,9 @@ interface ChannelStripProps {
   /** Output audio MediaStream for the live waveform. */
   stream: MediaStream | null;
   active: boolean;
+  /** Pin the latest finalized line for the post-service report. */
+  onPin?: (text: string) => void;
+  pinnedCount?: number;
 }
 
 /**
@@ -24,10 +27,11 @@ interface ChannelStripProps {
  * language's actual translated audio stream.
  */
 export function ChannelStrip({
-  lang, current, history, listeners, stream, active,
+  lang, current, history, listeners, stream, active, onPin, pinnedCount,
 }: ChannelStripProps) {
   const meta = LANGUAGES_BY_CODE[lang];
   const hasActivity = !!current || history.length > 0;
+  const pinnable = current || history.at(-1) || '';
 
   return (
     <div className={cn(
@@ -58,6 +62,25 @@ export function ChannelStrip({
               <Users className="h-3 w-3" />
               <span className="readout">{listeners}</span>
             </span>
+            {onPin && (
+              <button
+                type="button"
+                onClick={() => pinnable && onPin(pinnable)}
+                disabled={!pinnable}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition',
+                  pinnedCount && pinnedCount > 0
+                    ? 'border-accent-500 bg-accent-900/30 text-accent-200'
+                    : 'border-white/[0.06] bg-white/[0.02] text-ink-400 hover:border-white/[0.12] hover:text-ink-100',
+                  !pinnable && 'opacity-40 cursor-not-allowed',
+                )}
+                title="Star this line for the post-service report"
+                aria-label="Pin moment"
+              >
+                <Pin className="h-3 w-3" />
+                {pinnedCount ?? 0}
+              </button>
+            )}
           </div>
         </div>
 
