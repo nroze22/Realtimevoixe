@@ -8,11 +8,13 @@ import {
   Cable,
   Check,
   Circle,
+  Command,
   DollarSign,
   Download,
   ExternalLink,
   FileText,
   Headphones,
+  Keyboard,
   Mic,
   Pause as PauseIcon,
   Play,
@@ -38,6 +40,11 @@ import { operatorWsUrl, recordingHref } from '@/lib/orchestrator';
 import { cn } from '@/lib/cn';
 import { Button, CopyButton, Eyebrow, PhasePill, Stat } from '@/components/ui';
 import { Waveform } from '@/components/waveform';
+import { AnimatedNumber } from '@/components/animated-number';
+import { ChannelStrip } from '@/components/channel-strip';
+import { CommandPalette, type CommandItem } from '@/components/command-palette';
+import { Logo } from '@/components/logo';
+import { useToast } from '@/components/toast';
 
 interface StoredService {
   config: ServiceConfig;
@@ -77,9 +84,13 @@ export default function OperatorConsole() {
   const [hasSpokenAbove, setHasSpokenAbove] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [inputStream, setInputStream] = useState<MediaStream | null>(null);
+  const [outputStreams, setOutputStreams] = useState<Record<string, MediaStream>>({});
+  const [cmdOpen, setCmdOpen] = useState(false);
   const [endedSummary, setEndedSummary] = useState<null | {
     durationSec: number; costUSD: number; peakListeners: number;
   }>(null);
+
+  const toast = useToast();
 
   const engineRef = useRef<AudioEngine | null>(null);
   const publisherRef = useRef<LivekitPublisher | null>(null);
@@ -161,15 +172,21 @@ export default function OperatorConsole() {
         break;
       case 'cap.warning':
         setCapWarning(msg.capFraction);
+        toast.warn(
+          `${Math.round(msg.capFraction * 100)}% of cost cap`,
+          'Consider stopping or raising the cap before the service ends.',
+        );
         break;
       case 'cap.reached':
         setCapReached(true);
+        toast.error('Cost cap reached', 'Service stopped automatically to protect your bill.');
         break;
       case 'listener.count':
         setListeners({ byLanguage: msg.byLanguage, total: msg.total });
         break;
       case 'error':
         setError(msg.message);
+        toast.error('Error', msg.message);
         break;
     }
   }, [elapsedSec, cost]);
@@ -190,6 +207,7 @@ export default function OperatorConsole() {
     const engine = new AudioEngine({
       onConnectionChange: setConn,
       onLanguageStream: async (lang, stream) => {
+        setOutputStreams((prev) => ({ ...prev, [lang]: stream }));
         const pub = publisherRef.current;
         if (pub) {
           try { await pub.publishLanguage(lang, stream); }
@@ -313,10 +331,14 @@ export default function OperatorConsole() {
         historyByLang={historyByLang}
         inputLevel={inputLevel}
         inputStream={inputStream}
+        outputStreams={outputStreams}
         serviceId={serviceId}
+        cmdOpen={cmdOpen}
+        setCmdOpen={setCmdOpen}
         onPause={onPause}
         onResume={onResume}
         onStop={onStop}
+        toastSuccess={(t, b) => toast.success(t, b)}
       />
     );
   }
@@ -546,22 +568,98 @@ function OnAir(props: {
   historyByLang: Record<string, string[]>;
   inputLevel: { rms: number; peak: number };
   inputStream: MediaStream | null;
+  outputStreams: Record<string, MediaStream>;
   serviceId: string;
+  cmdOpen: boolean;
+  setCmdOpen: (v: boolean) => void;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
+  toastSuccess: (title: string, body?: string) => void;
 }) {
   const {
     cfg, joinCode, listenerUrl, targetLangs, phase, conn, elapsedSec, cost,
     capReached, capWarning, listeners, captionsByLang, historyByLang,
-    inputLevel, inputStream, serviceId, onPause, onResume, onStop,
+    inputLevel, inputStream, outputStreams, serviceId, cmdOpen, setCmdOpen,
+    onPause, onResume, onStop, toastSuccess,
   } = props;
+
+  // ---------- Command palette items ----------
+  const cmdItems: CommandItem[] = [
+    {
+      id: 'pause-resume', group: 'Service',
+      title: phase === 'live' ? 'Pause translation' : 'Resume translation',
+      hint: phase === 'live' ? 'Mic continues capturing' : 'Pick up where you left off',
+      icon: phase === 'live' ? PauseIcon : Play,
+      shortcut: ['space'],
+      action: () => (phase === 'live' ? onPause() : onResume()),
+    },
+    {
+      id: 'stop', group: 'Service',
+      title: 'Stop the service',
+      hint: 'Ends translation and saves recordings',
+      icon: Square,
+      shortcut: ['shift', '.'],
+      action: onStop,
+    },
+    {
+      id: 'copy-code', group: 'Share',
+      title: 'Copy join code',
+      hint: joinCode,
+      icon: Share2,
+      action: async () => {
+        try { await navigator.clipboard.writeText(joinCode); toastSuccess('Copied join code', joinCode); } catch {/* noop */}
+      },
+    },
+    {
+      id: 'copy-link', group: 'Share',
+      title: 'Copy listener link',
+      hint: listenerUrl,
+      icon: ExternalLink,
+      action: async () => {
+        try { await navigator.clipboard.writeText(listenerUrl); toastSuccess('Copied listener link'); } catch {/* noop */}
+      },
+    },
+    {
+      id: 'open-listener', group: 'Share',
+      title: 'Open listener page',
+      icon: Headphones,
+      action: () => window.open(listenerUrl, '_blank', 'noreferrer'),
+    },
+    ...targetLangs.map((l) => ({
+      id: `bcast-${l}`,
+      group: 'Headset broadcast',
+      title: `Open broadcast · ${LANGUAGES_BY_CODE[l].englishName}`,
+      hint: `For wiring into FM/IR/transmitter`,
+      icon: Radio,
+      action: () => window.open(`/broadcast/${joinCode}/${l}`, '_blank', 'noreferrer'),
+    })),
+  ];
+
+  // Spacebar pause/resume
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (phase === 'live') onPause();
+        else if (phase === 'paused') onResume();
+      } else if (e.shiftKey && e.key === '>') {
+        e.preventDefault();
+        onStop();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, onPause, onResume, onStop]);
 
   return (
     <main className="min-h-dvh">
       {/* Sticky control bar */}
-      <header className="sticky top-0 z-30 border-b border-ink-800/80 bg-ink-950/85 backdrop-blur-md">
+      <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-ink-950/85 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-5 py-3 flex items-center gap-4">
+          <Logo size={18} />
           <PhasePill
             tone={phase === 'live' ? 'live' : 'paused'}
             label={phase === 'live' ? 'ON AIR' : 'PAUSED'}
@@ -574,6 +672,13 @@ function OnAir(props: {
           <div className="hidden md:block w-40">
             <Waveform stream={inputStream} active color="bg-emerald-400" bars={28} className="h-7" />
           </div>
+          <button
+            onClick={() => setCmdOpen(true)}
+            className="hidden md:inline-flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-ink-300 hover:bg-white/[0.06] hover:border-white/[0.12] transition"
+            aria-label="Open command palette"
+          >
+            <Command className="h-3 w-3" /> <span className="kbd">⌘K</span>
+          </button>
           {phase === 'live' ? (
             <Button variant="warn" onClick={onPause} icon={PauseIcon}>Pause</Button>
           ) : (
@@ -594,24 +699,26 @@ function OnAir(props: {
       </header>
 
       <div className="mx-auto max-w-7xl px-5 py-6 grid gap-6 lg:grid-cols-[1fr_340px]">
-        {/* Captions canvas */}
-        <section className="grid gap-5">
-          <CaptionPanel
-            label={`Source · ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`}
+        {/* Captions canvas — source first then mixer-style channel strips */}
+        <section className="grid gap-4">
+          <SourceCaption
+            cfg={cfg}
             current={captionsByLang[cfg.sourceLanguage] ?? ''}
             history={historyByLang[cfg.sourceLanguage] ?? []}
-            isSource
           />
-          {targetLangs.map((lang) => (
-            <CaptionPanel
-              key={lang}
-              label={`${LANGUAGES_BY_CODE[lang].englishName} · ${LANGUAGES_BY_CODE[lang].nativeName}`}
-              listeners={listeners.byLanguage[lang] ?? 0}
-              current={captionsByLang[lang] ?? ''}
-              history={historyByLang[lang] ?? []}
-              rtl={LANGUAGES_BY_CODE[lang].rtl}
-            />
-          ))}
+          <div className="grid gap-3">
+            {targetLangs.map((lang) => (
+              <ChannelStrip
+                key={lang}
+                lang={lang}
+                current={captionsByLang[lang] ?? ''}
+                history={historyByLang[lang] ?? []}
+                listeners={listeners.byLanguage[lang] ?? 0}
+                stream={outputStreams[lang] ?? null}
+                active={phase === 'live'}
+              />
+            ))}
+          </div>
         </section>
 
         {/* Sidebar */}
@@ -619,7 +726,7 @@ function OnAir(props: {
           <Stat
             label="Cost"
             icon={DollarSign}
-            value={cost ? `$${cost.costUSD.toFixed(2)}` : '$0.00'}
+            value={<AnimatedNumber value={cost?.costUSD ?? 0} prefix="$" decimals={2} />}
             sub={cost ? `cap $${cfg.costCapUSD.toFixed(0)} · ${cost.burnPerMinuteUSD.toFixed(2)}/min burn` : 'estimating…'}
             progress={cost ? Math.round(cost.capFraction * 100) : 0}
             progressTone={
@@ -645,19 +752,20 @@ function OnAir(props: {
             </div>
           </div>
 
-          <div className="card">
-            <Eyebrow className="mb-2 flex items-center gap-1.5">
+          <div className="card relative overflow-hidden">
+            <div className="absolute -top-12 -right-12 h-32 w-32 rounded-full bg-accent-700/15 blur-2xl pointer-events-none" aria-hidden />
+            <Eyebrow className="mb-2 flex items-center gap-1.5 relative">
               <Share2 className="h-3 w-3 text-ink-500" /> Share
             </Eyebrow>
-            <div className="flex items-center gap-2">
-              <div className="font-mono text-xl tracking-[0.18em] text-ink-50">{joinCode}</div>
+            <div className="flex items-center gap-2 relative">
+              <div className="font-mono text-2xl tracking-[0.22em] text-ink-50">{joinCode}</div>
               <CopyButton value={joinCode} label="" compact />
             </div>
-            <div className="rounded-lg bg-white p-2 inline-block mt-3">
+            <div className="rounded-lg bg-white p-2 inline-block mt-3 relative">
               <QRCodeSVG value={listenerUrl} size={148} />
             </div>
             <a href={listenerUrl} target="_blank" rel="noreferrer"
-               className="btn btn-ghost mt-3 w-full text-xs">
+               className="btn btn-ghost mt-3 w-full text-xs relative">
               <ExternalLink className="h-3 w-3" /> Open listener page
             </a>
           </div>
@@ -703,9 +811,61 @@ function OnAir(props: {
               ))}
             </div>
           </div>
+
+          <div className="rounded-xl border border-white/[0.04] bg-white/[0.01] p-3 text-[11px] text-ink-500 leading-relaxed">
+            <div className="flex items-center gap-1.5 mb-1.5 text-ink-400">
+              <Keyboard className="h-3 w-3" /> Shortcuts
+            </div>
+            <ul className="grid gap-1.5">
+              <li className="flex justify-between"><span>Command palette</span><span className="kbd">⌘K</span></li>
+              <li className="flex justify-between"><span>Pause / resume</span><span className="kbd">space</span></li>
+              <li className="flex justify-between"><span>Stop</span><span className="flex gap-1"><span className="kbd">shift</span><span className="kbd">.</span></span></li>
+            </ul>
+          </div>
         </aside>
       </div>
+
+      <CommandPalette items={cmdItems} open={cmdOpen} setOpen={setCmdOpen} />
     </main>
+  );
+}
+
+function SourceCaption({
+  cfg, current, history,
+}: {
+  cfg: ServiceConfig;
+  current: string;
+  history: string[];
+}) {
+  return (
+    <div className="card-elev relative overflow-hidden">
+      <div className="absolute -top-24 -left-24 h-72 w-72 rounded-full bg-accent-700/10 blur-3xl pointer-events-none" aria-hidden />
+      <div className="flex items-center gap-2 relative">
+        <span className="inline-flex items-center gap-1.5 chip">
+          <Mic className="h-3 w-3 text-accent-300" />
+          Source · {LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}
+        </span>
+        {cfg.pastorName && <span className="text-xs text-ink-500">· {cfg.pastorName}</span>}
+      </div>
+      <div
+        key={current || '__empty__'}
+        className={cn(
+          'mt-3 text-pretty leading-snug',
+          current
+            ? 'text-2xl md:text-3xl font-medium text-ink-50 caption-in'
+            : 'text-base text-ink-700 italic',
+        )}
+      >
+        {current || 'Waiting for the speaker…'}
+      </div>
+      {history.length > 0 && (
+        <ul className="mt-3 space-y-1 text-sm text-ink-500 max-h-24 overflow-hidden">
+          {history.slice(-3, -1).map((h, i) => (
+            <li key={i} className="leading-snug opacity-70">{h}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

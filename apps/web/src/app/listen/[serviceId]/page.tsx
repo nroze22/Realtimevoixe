@@ -400,14 +400,20 @@ function CaptionStack({
 
   if (captions.length === 0) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center gap-2 animate-fade-in">
-        <div className="h-10 w-10 rounded-full bg-ink-900/70 ring-1 ring-ink-800 flex items-center justify-center mb-1">
-          <Headphones className="h-4 w-4 text-ink-500" />
+      <div className="h-full flex flex-col items-center justify-center text-center gap-3 animate-fade-in">
+        <div className="relative h-14 w-14">
+          <div className="absolute inset-0 rounded-full bg-accent-900/30 animate-pulse-ring" />
+          <div className="absolute inset-1 rounded-full bg-ink-900/80 ring-1 ring-white/[0.06] flex items-center justify-center">
+            <Headphones className="h-5 w-5 text-accent-300" />
+          </div>
         </div>
-        <p className="text-ink-400 text-sm max-w-xs text-pretty">
+        <p className="text-ink-400 text-sm max-w-xs text-pretty mt-2">
           {phase === 'connecting'
             ? 'Connecting to the service…'
             : 'Captions will appear here moments after the speaker begins.'}
+        </p>
+        <p className="text-[11px] text-ink-600 max-w-xs">
+          Plug in your earbuds for the best experience.
         </p>
       </div>
     );
@@ -421,7 +427,7 @@ function CaptionStack({
       <ul className="space-y-3 pb-6">
         {recent.map((c, i) => (
           <li key={`${c.tMs}-${i}`} className={cn(
-            'text-ink-400 leading-snug text-pretty',
+            'text-ink-400 leading-snug text-pretty transition-opacity duration-300',
             big ? 'text-lg' : 'text-base',
           )}>
             {c.text}
@@ -430,7 +436,7 @@ function CaptionStack({
         <li
           key={`${last.tMs}-last`}
           className={cn(
-            'font-medium text-ink-50 leading-snug text-balance animate-fade-in',
+            'font-medium text-ink-50 leading-snug text-balance caption-in',
             big ? 'text-3xl' : 'text-2xl',
           )}
         >
