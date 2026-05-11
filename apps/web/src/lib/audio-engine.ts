@@ -174,6 +174,16 @@ export class AudioEngine {
     return sink.stream;
   }
 
+  /** The active capture MediaStream, or null if capture hasn't started. */
+  getInputStream(): MediaStream | null {
+    return this.mediaStream;
+  }
+
+  /** The translated-audio MediaStream for a given language, or null. */
+  getOutputStream(lang: LanguageCode): MediaStream | null {
+    return this.sinks.get(lang)?.stream ?? null;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;

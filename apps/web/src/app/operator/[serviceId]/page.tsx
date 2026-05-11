@@ -4,6 +4,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import {
+  ArrowRight,
+  Cable,
+  Check,
+  Circle,
+  DollarSign,
+  Download,
+  ExternalLink,
+  FileText,
+  Headphones,
+  Mic,
+  Pause as PauseIcon,
+  Play,
+  Radio,
+  Share2,
+  Square,
+  Users,
+  Volume2,
+  Music,
+} from 'lucide-react';
+import {
   type CaptionFrame,
   type CostUpdate,
   type LanguageCode,
@@ -15,6 +35,9 @@ import { AudioEngine } from '@/lib/audio-engine';
 import { LevelTester } from '@/lib/level-tester';
 import { LivekitPublisher } from '@/lib/livekit-publisher';
 import { operatorWsUrl, recordingHref } from '@/lib/orchestrator';
+import { cn } from '@/lib/cn';
+import { Button, CopyButton, Eyebrow, PhasePill, Stat } from '@/components/ui';
+import { Waveform } from '@/components/waveform';
 
 interface StoredService {
   config: ServiceConfig;
@@ -24,8 +47,6 @@ interface StoredService {
 
 type Conn = 'connecting' | 'open' | 'closed' | 'error';
 type Phase = 'setup' | 'live' | 'paused' | 'stopped';
-
-/** Pre-flight wizard steps. */
 type Step = 'device' | 'level' | 'share' | 'launch';
 
 export default function OperatorConsole() {
@@ -45,7 +66,6 @@ export default function OperatorConsole() {
   const [captionsByLang, setCaptionsByLang] = useState<Record<string, string>>({});
   const [historyByLang, setHistoryByLang] = useState<Record<string, string[]>>({});
   const [cost, setCost] = useState<CostUpdate | null>(null);
-  const [logs, setLogs] = useState<{ level: string; message: string; t: number }[]>([]);
   const [capWarning, setCapWarning] = useState<number | null>(null);
   const [capReached, setCapReached] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,10 +76,15 @@ export default function OperatorConsole() {
   const [inputLevel, setInputLevel] = useState({ rms: 0, peak: 0 });
   const [hasSpokenAbove, setHasSpokenAbove] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [inputStream, setInputStream] = useState<MediaStream | null>(null);
+  const [endedSummary, setEndedSummary] = useState<null | {
+    durationSec: number; costUSD: number; peakListeners: number;
+  }>(null);
 
   const engineRef = useRef<AudioEngine | null>(null);
   const publisherRef = useRef<LivekitPublisher | null>(null);
   const levelTesterRef = useRef<LevelTester | null>(null);
+  const peakListenersRef = useRef(0);
 
   const listenerUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -67,7 +92,7 @@ export default function OperatorConsole() {
     return `${window.location.origin}/listen/${code}`;
   }, [serviceId, stored?.joinCode]);
 
-  // ---------- Boot: load service from sessionStorage ----------
+  // ---------- Boot ----------
   useEffect(() => {
     const raw = sessionStorage.getItem(`service:${serviceId}`);
     if (!raw) {
@@ -77,7 +102,6 @@ export default function OperatorConsole() {
     setStored(JSON.parse(raw) as StoredService);
   }, [serviceId]);
 
-  // ---------- Enumerate audio inputs ----------
   useEffect(() => {
     async function enumerate() {
       try {
@@ -88,11 +112,8 @@ export default function OperatorConsole() {
         );
         setDevices(list);
         const saved = localStorage.getItem('rtv:operator:device');
-        if (saved && list.some((d) => d.deviceId === saved)) {
-          setSelectedDevice(saved);
-        } else if (list[0]) {
-          setSelectedDevice(list[0].deviceId);
-        }
+        if (saved && list.some((d) => d.deviceId === saved)) setSelectedDevice(saved);
+        else if (list[0]) setSelectedDevice(list[0].deviceId);
       } catch {
         setError('Microphone permission denied. Allow access to choose an audio source.');
       }
@@ -100,7 +121,6 @@ export default function OperatorConsole() {
     void enumerate();
   }, []);
 
-  // Mark device step OK once a device is selected.
   useEffect(() => {
     if (selectedDevice) {
       setStepOk((s) => ({ ...s, device: true }));
@@ -108,12 +128,15 @@ export default function OperatorConsole() {
     }
   }, [selectedDevice]);
 
-  // ---------- Elapsed timer while live ----------
   useEffect(() => {
     if (phase !== 'live') return;
     const t = setInterval(() => setElapsedSec((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [phase]);
+
+  useEffect(() => {
+    peakListenersRef.current = Math.max(peakListenersRef.current, listeners.total);
+  }, [listeners.total]);
 
   // ---------- WS message router ----------
   const handleMessage = useCallback((msg: OrchestratorMessage) => {
@@ -121,7 +144,14 @@ export default function OperatorConsole() {
       case 'state':
         if (msg.state.status === 'live') setPhase('live');
         else if (msg.state.status === 'paused') setPhase('paused');
-        else if (msg.state.status === 'stopped') setPhase('stopped');
+        else if (msg.state.status === 'stopped') {
+          setPhase('stopped');
+          setEndedSummary({
+            durationSec: elapsedSec,
+            costUSD: cost?.costUSD ?? 0,
+            peakListeners: peakListenersRef.current,
+          });
+        }
         break;
       case 'caption':
         applyCaption(msg.frame);
@@ -138,17 +168,11 @@ export default function OperatorConsole() {
       case 'listener.count':
         setListeners({ byLanguage: msg.byLanguage, total: msg.total });
         break;
-      case 'log':
-        setLogs((prev) => [
-          ...prev.slice(-50),
-          { level: msg.level, message: msg.message, t: msg.tMs },
-        ]);
-        break;
       case 'error':
         setError(msg.message);
         break;
     }
-  }, []);
+  }, [elapsedSec, cost]);
 
   function applyCaption(frame: CaptionFrame) {
     setCaptionsByLang((prev) => ({ ...prev, [frame.language]: frame.text }));
@@ -160,7 +184,7 @@ export default function OperatorConsole() {
     }
   }
 
-  // ---------- Connect to orchestrator + LiveKit ----------
+  // ---------- Connect ----------
   const connect = useCallback(async () => {
     if (!stored) return;
     const engine = new AudioEngine({
@@ -184,7 +208,6 @@ export default function OperatorConsole() {
 
     await engine.connect(operatorWsUrl(serviceId));
     engine.send({ type: 'hello', serviceId, role: 'operator' });
-
     for (const lang of stored.config.targetLanguages as LanguageCode[]) {
       await engine.ensureSink(lang);
     }
@@ -196,20 +219,29 @@ export default function OperatorConsole() {
     try {
       if (!engineRef.current) await connect();
       await engineRef.current!.startCapture(selectedDevice || null);
+      setInputStream(engineRef.current!.getInputStream());
       engineRef.current!.send({ type: 'start' });
       setElapsedSec(0);
+      setEndedSummary(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
-  function onPause() { engineRef.current?.send({ type: 'pause' }); }
+  function onPause()  { engineRef.current?.send({ type: 'pause' }); }
   function onResume() { engineRef.current?.send({ type: 'resume' }); }
   async function onStop() {
+    setEndedSummary({
+      durationSec: elapsedSec,
+      costUSD: cost?.costUSD ?? 0,
+      peakListeners: peakListenersRef.current,
+    });
     engineRef.current?.send({ type: 'stop' });
     await publisherRef.current?.disconnect();
     await engineRef.current?.close();
     publisherRef.current = null;
     engineRef.current = null;
+    setInputStream(null);
+    setPhase('stopped');
   }
 
   async function toggleTest() {
@@ -224,7 +256,7 @@ export default function OperatorConsole() {
       const tester = new LevelTester();
       await tester.start(selectedDevice || null, (rms, peak) => {
         setInputLevel((prev) => ({ rms, peak: Math.max(prev.peak * 0.96, peak) }));
-        if (rms > 0.02) setHasSpokenAbove(true); // ~-34dBFS
+        if (rms > 0.02) setHasSpokenAbove(true);
       });
       levelTesterRef.current = tester;
       setTesting(true);
@@ -233,7 +265,6 @@ export default function OperatorConsole() {
     }
   }
 
-  // Once test has heard real audio, level step is OK.
   useEffect(() => {
     if (hasSpokenAbove) setStepOk((s) => ({ ...s, level: true }));
   }, [hasSpokenAbove]);
@@ -248,21 +279,22 @@ export default function OperatorConsole() {
   if (error && !stored) {
     return (
       <main className="mx-auto max-w-2xl px-6 py-12">
-        <div className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-          {error}
-        </div>
+        <div className="card border-red-500/40 bg-red-500/10 text-red-200 text-sm">{error}</div>
         <a href="/operator/new" className="btn btn-primary mt-6">Create a service</a>
       </main>
     );
   }
   if (!stored) {
-    return <main className="mx-auto max-w-2xl px-6 py-12 text-ink-400">Loading…</main>;
+    return (
+      <main className="mx-auto max-w-2xl px-6 py-12">
+        <div className="card animate-pulse text-ink-500">Loading service…</div>
+      </main>
+    );
   }
 
   const cfg = stored.config;
   const targetLangs = cfg.targetLanguages as LanguageCode[];
 
-  // ---------------------------- ON-AIR MODE ----------------------------
   if (phase === 'live' || phase === 'paused') {
     return (
       <OnAir
@@ -280,6 +312,7 @@ export default function OperatorConsole() {
         captionsByLang={captionsByLang}
         historyByLang={historyByLang}
         inputLevel={inputLevel}
+        inputStream={inputStream}
         serviceId={serviceId}
         onPause={onPause}
         onResume={onResume}
@@ -288,39 +321,71 @@ export default function OperatorConsole() {
     );
   }
 
-  // ---------------------------- SETUP WIZARD ----------------------------
+  if (phase === 'stopped' && endedSummary) {
+    return (
+      <EndedSummary
+        cfg={cfg}
+        joinCode={stored.joinCode}
+        serviceId={serviceId}
+        targetLangs={targetLangs}
+        durationSec={endedSummary.durationSec}
+        costUSD={endedSummary.costUSD}
+        peakListeners={endedSummary.peakListeners}
+      />
+    );
+  }
+
   const allReady = stepOk.device && stepOk.level && stepOk.share;
 
   return (
-    <main className="mx-auto max-w-3xl px-5 py-8 md:py-12">
-      <header className="mb-6">
-        <div className="flex items-center justify-between">
-          <p className="text-xs uppercase tracking-[0.2em] text-ink-500">Pre-flight</p>
-          <ConnBadge conn={conn} phase={phase} />
+    <main className="mx-auto max-w-3xl px-5 py-8 md:py-14 animate-fade-in">
+      <header className="mb-7">
+        <div className="flex items-center justify-between gap-3">
+          <Eyebrow>Pre-flight</Eyebrow>
+          <PhasePill
+            tone={
+              conn === 'open' ? 'ready'
+              : conn === 'connecting' ? 'connecting'
+              : 'offline'
+            }
+            label={
+              conn === 'open' ? 'READY'
+              : conn === 'connecting' ? 'CONNECTING'
+              : 'OFFLINE'
+            }
+            pulse={conn === 'connecting'}
+          />
         </div>
-        <h1 className="mt-2 text-2xl md:text-3xl font-semibold tracking-tight">{cfg.title}</h1>
-        <p className="text-sm text-ink-400">
+        <h1 className="mt-2 text-3xl md:text-4xl font-semibold tracking-tightish">{cfg.title}</h1>
+        <p className="text-sm text-ink-400 mt-1">
           {LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}
           <span className="mx-2 text-ink-700">→</span>
           {targetLangs.map((c) => LANGUAGES_BY_CODE[c].englishName).join(', ')}
         </p>
       </header>
 
-      <ol className="grid gap-3">
+      {/* Progress rail */}
+      <ProgressRail
+        steps={[
+          { key: 'device', label: 'Audio',     done: stepOk.device },
+          { key: 'level',  label: 'Signal',    done: stepOk.level },
+          { key: 'share',  label: 'Share',     done: stepOk.share },
+          { key: 'launch', label: 'Go live',   done: false },
+        ]}
+        active={step}
+      />
+
+      <ol className="mt-7 grid gap-3">
         <WizardStep
           n={1}
+          icon={Cable}
           title="Plug in your audio source"
+          tagline="Pick the device that's carrying the pulpit mic."
           done={stepOk.device}
           open={step === 'device'}
           onOpen={() => setStep('device')}
           onContinue={() => setStep('level')}
-          continueLabel="Next: test the signal"
         >
-          <p className="text-sm text-ink-400 mb-3">
-            Connect a cable from a clean mono aux send on your mixer
-            (X32/M32/Yamaha/A&amp;H/StudioLive) into a USB audio interface plugged
-            into this laptop. Then pick that interface here.
-          </p>
           <label className="field-label">Audio input device</label>
           <select
             className="field-input"
@@ -333,34 +398,36 @@ export default function OperatorConsole() {
               </option>
             ))}
           </select>
-          <ul className="mt-3 text-xs text-ink-500 list-disc pl-4 space-y-1">
-            <li>Use a <strong className="text-ink-200">post-EQ aux send</strong>, not the main mix.</li>
-            <li>Set the channel to mono if your console allows it.</li>
-            <li>Echo cancellation / noise suppression are disabled here — your console&apos;s gates and EQ are the source of truth.</li>
-          </ul>
+          <Hint className="mt-3">
+            Take a balanced cable from any <strong className="text-ink-200">post-EQ mono aux send</strong> on your mixer
+            (X32/M32/Yamaha/A&amp;H/StudioLive) into a USB audio interface, then pick that
+            interface above.
+          </Hint>
         </WizardStep>
 
         <WizardStep
           n={2}
+          icon={Mic}
           title="Test the signal"
+          tagline="Make sure we're actually hearing the mic."
           done={stepOk.level}
           open={step === 'level'}
           onOpen={() => setStep('level')}
           disabled={!stepOk.device}
           onContinue={() => setStep('share')}
-          continueLabel="Next: share with congregation"
         >
-          <p className="text-sm text-ink-400 mb-3">
-            Have someone speak into the pulpit mic. You want the green bar to
-            sit around the middle when they speak normally, with peaks (the
-            amber line) below the top.
+          <p className="text-sm text-ink-400 mb-3 text-pretty">
+            Have someone speak normally into the pulpit mic. You want the green
+            bar around the middle, with peaks (amber line) below the top.
           </p>
           <div className="flex items-center gap-3">
-            <button onClick={toggleTest} className="btn btn-primary">
+            <Button variant="primary" onClick={toggleTest} icon={testing ? Square : Play}>
               {testing ? 'Stop test' : 'Start test'}
-            </button>
+            </Button>
             {hasSpokenAbove && (
-              <span className="chip chip-on">Signal detected ✓</span>
+              <span className="chip chip-on">
+                <Check className="h-3 w-3" /> Signal detected
+              </span>
             )}
           </div>
           <div className="mt-4">
@@ -370,96 +437,89 @@ export default function OperatorConsole() {
 
         <WizardStep
           n={3}
+          icon={Share2}
           title="Share with your congregation"
+          tagline="Print the QR, project the code, or hand it to ushers."
           done={stepOk.share}
           open={step === 'share'}
           onOpen={() => setStep('share')}
           disabled={!stepOk.level}
           onContinue={() => { setStepOk((s) => ({ ...s, share: true })); setStep('launch'); }}
-          continueLabel="I'm ready to go live"
         >
-          <div className="grid gap-4 md:grid-cols-[auto_1fr] items-start">
-            <div className="rounded-lg bg-white p-3 inline-block">
-              <QRCodeSVG value={listenerUrl} size={156} />
+          <div className="grid gap-5 md:grid-cols-[auto_1fr] items-start">
+            <div className="rounded-xl bg-white p-3 inline-block">
+              <QRCodeSVG value={listenerUrl} size={172} />
             </div>
             <div>
-              <div className="text-[11px] uppercase tracking-wider text-ink-500">Join code</div>
-              <div className="font-mono text-2xl tracking-widest text-ink-50">
-                {stored.joinCode}
+              <Eyebrow>Join code</Eyebrow>
+              <div className="mt-1 flex items-center gap-2">
+                <div className="font-mono text-3xl tracking-[0.18em] text-ink-50">{stored.joinCode}</div>
+                <CopyButton value={stored.joinCode} label="code" />
               </div>
-              <a
-                href={listenerUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-block text-xs text-accent break-all hover:underline"
-              >
-                {listenerUrl}
-              </a>
-              <p className="mt-3 text-xs text-ink-500">
-                Print the QR + code, project it on a screen for ~30 seconds before service,
-                or hand it to ushers. The code stays valid until you stop the service.
-              </p>
+              <div className="mt-3 flex items-center gap-2">
+                <a href={listenerUrl} target="_blank" rel="noreferrer"
+                   className="text-xs text-accent-300 break-all hover:underline">{listenerUrl}</a>
+                <CopyButton value={listenerUrl} label="link" compact />
+              </div>
+              <Hint className="mt-4">
+                The code stays valid until you stop the service. Project it on a
+                screen for ~30 seconds before service starts.
+              </Hint>
             </div>
           </div>
-          <details className="mt-5 text-xs">
-            <summary className="cursor-pointer text-ink-300">
+
+          <details className="mt-5 rounded-lg border border-ink-800 bg-ink-900/40 px-4 py-3">
+            <summary className="cursor-pointer text-sm text-ink-200 flex items-center gap-2">
+              <Headphones className="h-4 w-4 text-ink-400" />
               Using existing FM/IR headsets?
             </summary>
-            <div className="mt-2 text-ink-400 space-y-1.5 leading-relaxed">
+            <div className="mt-3 text-xs text-ink-400 space-y-2">
               <p>
-                Open a per-language broadcast page on a laptop near your transmitter and
-                wire its line-out into the transmitter input:
+                Open one of these broadcast pages on a laptop near your transmitter and
+                wire its line-out into the transmitter input. The page keeps the screen
+                awake and auto-reconnects.
               </p>
-              <ul className="space-y-1 font-mono text-[11px]">
-                {targetLangs.map((l) => (
-                  <li key={l}>
-                    <span className="text-ink-500">{LANGUAGES_BY_CODE[l].englishName}:</span>{' '}
-                    <a
-                      className="text-accent break-all"
-                      target="_blank"
-                      rel="noreferrer"
-                      href={`/broadcast/${stored.joinCode}/${l}`}
-                    >
-                      {typeof window !== 'undefined' ? window.location.origin : ''}/broadcast/{stored.joinCode}/{l}
-                    </a>
-                  </li>
-                ))}
+              <ul className="space-y-1">
+                {targetLangs.map((l) => {
+                  const href = `/broadcast/${stored.joinCode}/${l}`;
+                  return (
+                    <li key={l} className="flex items-center gap-2">
+                      <span className="text-ink-300 w-32 truncate">{LANGUAGES_BY_CODE[l].englishName}</span>
+                      <a className="text-accent-300 hover:underline inline-flex items-center gap-1 break-all" target="_blank" rel="noreferrer" href={href}>
+                        {href} <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </li>
+                  );
+                })}
               </ul>
-              <p className="mt-2">
-                See the README for cabling diagrams (Williams AV, Listen Tech, Sennheiser
-                MobileConnect).
-              </p>
             </div>
           </details>
         </WizardStep>
 
         <WizardStep
           n={4}
+          icon={Radio}
           title="Go live"
+          tagline="Translation starts immediately. You can pause or stop anytime."
           done={false}
           open={step === 'launch'}
           onOpen={() => setStep('launch')}
           disabled={!allReady}
         >
-          <p className="text-sm text-ink-400 mb-3">
-            Translation will start immediately. The first $30 of usage is your
-            hard cap — we&apos;ll stop automatically if reached.
-          </p>
+          <div className="rounded-xl border border-ink-800 bg-ink-900/40 p-4 grid gap-3">
+            <Row label="Source" value={LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName} />
+            <Row label="Targets" value={targetLangs.map((c) => LANGUAGES_BY_CODE[c].englishName).join(', ')} />
+            <Row label="Cost cap" value={`$${cfg.costCapUSD.toFixed(0)}`} />
+            <Row label="Join code" value={stored.joinCode} mono />
+          </div>
           {error && (
-            <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200 animate-fade-in">
               {error}
             </div>
           )}
-          <button
-            onClick={onGoLive}
-            disabled={!allReady}
-            className="btn btn-primary w-full h-12 text-base"
-          >
+          <Button variant="primary" size="lg" onClick={onGoLive} disabled={!allReady} className="w-full mt-5" icon={Radio}>
             Go live now
-          </button>
-          <p className="mt-2 text-[10px] text-ink-600 text-center">
-            You can pause or stop at any time.
-          </p>
+          </Button>
         </WizardStep>
       </ol>
     </main>
@@ -467,7 +527,7 @@ export default function OperatorConsole() {
 }
 
 // ============================================================================
-// ON-AIR component
+// ON-AIR
 // ============================================================================
 
 function OnAir(props: {
@@ -485,6 +545,7 @@ function OnAir(props: {
   captionsByLang: Record<string, string>;
   historyByLang: Record<string, string[]>;
   inputLevel: { rms: number; peak: number };
+  inputStream: MediaStream | null;
   serviceId: string;
   onPause: () => void;
   onResume: () => void;
@@ -492,44 +553,33 @@ function OnAir(props: {
 }) {
   const {
     cfg, joinCode, listenerUrl, targetLangs, phase, conn, elapsedSec, cost,
-    capReached, capWarning, listeners, captionsByLang, historyByLang, inputLevel,
-    serviceId, onPause, onResume, onStop,
+    capReached, capWarning, listeners, captionsByLang, historyByLang,
+    inputLevel, inputStream, serviceId, onPause, onResume, onStop,
   } = props;
 
-  const ring = phase === 'live'
-    ? 'shadow-[0_0_0_2px_rgba(16,185,129,0.5)]'
-    : phase === 'paused'
-      ? 'shadow-[0_0_0_2px_rgba(245,158,11,0.5)]'
-      : '';
-
   return (
-    <main className={`min-h-dvh ${ring}`}>
-      {/* Top bar */}
-      <div className="sticky top-0 z-20 bg-ink-950/90 backdrop-blur border-b border-ink-800">
+    <main className="min-h-dvh">
+      {/* Sticky control bar */}
+      <header className="sticky top-0 z-30 border-b border-ink-800/80 bg-ink-950/85 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-5 py-3 flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span
-              className={`h-3 w-3 rounded-full ${
-                phase === 'live' ? 'bg-emerald-400 animate-pulse'
-                  : phase === 'paused' ? 'bg-amber-400'
-                  : 'bg-ink-500'
-              }`}
-            />
-            <span className="font-semibold tracking-wider text-sm">
-              {phase === 'live' ? 'ON AIR' : phase === 'paused' ? 'PAUSED' : '—'}
-            </span>
+          <PhasePill
+            tone={phase === 'live' ? 'live' : 'paused'}
+            label={phase === 'live' ? 'ON AIR' : 'PAUSED'}
+            pulse={phase === 'live'}
+          />
+          <span className="readout text-sm text-ink-300">{fmtElapsed(elapsedSec)}</span>
+          <div className="flex-1 min-w-0 truncate text-sm text-ink-300">
+            {cfg.title}
           </div>
-          <span className="text-xs text-ink-500 tabular-nums">{fmtElapsed(elapsedSec)}</span>
-          <div className="flex-1 truncate text-sm text-ink-300">{cfg.title}</div>
-          <ConnBadge conn={conn} phase={phase} compact />
-          <div className="flex gap-2">
-            {phase === 'live' ? (
-              <button onClick={onPause} className="btn btn-warn">Pause</button>
-            ) : (
-              <button onClick={onResume} className="btn btn-primary">Resume</button>
-            )}
-            <button onClick={onStop} className="btn btn-danger">Stop</button>
+          <div className="hidden md:block w-40">
+            <Waveform stream={inputStream} active color="bg-emerald-400" bars={28} className="h-7" />
           </div>
+          {phase === 'live' ? (
+            <Button variant="warn" onClick={onPause} icon={PauseIcon}>Pause</Button>
+          ) : (
+            <Button variant="primary" onClick={onResume} icon={Play}>Resume</Button>
+          )}
+          <Button variant="danger" onClick={onStop} icon={Square}>Stop</Button>
         </div>
         {capReached && (
           <div className="bg-red-500/15 border-t border-red-500/30 text-red-200 text-xs px-5 py-1.5 text-center">
@@ -541,19 +591,19 @@ function OnAir(props: {
             {Math.round(capWarning * 100)}% of cost cap used.
           </div>
         )}
-      </div>
+      </header>
 
-      <div className="mx-auto max-w-7xl px-5 py-6 grid gap-6 lg:grid-cols-[1fr_320px]">
+      <div className="mx-auto max-w-7xl px-5 py-6 grid gap-6 lg:grid-cols-[1fr_340px]">
         {/* Captions canvas */}
         <section className="grid gap-5">
-          <CaptionPanelLg
+          <CaptionPanel
             label={`Source · ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`}
             current={captionsByLang[cfg.sourceLanguage] ?? ''}
             history={historyByLang[cfg.sourceLanguage] ?? []}
-            highlight
+            isSource
           />
           {targetLangs.map((lang) => (
-            <CaptionPanelLg
+            <CaptionPanel
               key={lang}
               label={`${LANGUAGES_BY_CODE[lang].englishName} · ${LANGUAGES_BY_CODE[lang].nativeName}`}
               listeners={listeners.byLanguage[lang] ?? 0}
@@ -564,65 +614,78 @@ function OnAir(props: {
           ))}
         </section>
 
-        {/* Right sidebar */}
+        {/* Sidebar */}
         <aside className="grid gap-5 content-start">
-          <MetricCard
+          <Stat
             label="Cost"
+            icon={DollarSign}
             value={cost ? `$${cost.costUSD.toFixed(2)}` : '$0.00'}
-            sub={cost ? `cap $${cfg.costCapUSD.toFixed(0)} · burn $${cost.burnPerMinuteUSD.toFixed(2)}/min` : '—'}
-            barPct={cost ? Math.round(cost.capFraction * 100) : 0}
+            sub={cost ? `cap $${cfg.costCapUSD.toFixed(0)} · ${cost.burnPerMinuteUSD.toFixed(2)}/min burn` : 'estimating…'}
+            progress={cost ? Math.round(cost.capFraction * 100) : 0}
+            progressTone={
+              cost && cost.capFraction > 0.9 ? 'danger'
+              : cost && cost.capFraction > 0.6 ? 'warn'
+              : 'good'
+            }
           />
-          <MetricCard
+          <Stat
             label="Listeners"
+            icon={Users}
             value={String(listeners.total)}
             sub="connected on phones"
           />
-          <MetricCard
-            label="Input level"
-            valueComponent={<LevelMeter rms={inputLevel.rms} peak={inputLevel.peak} active={phase === 'live'} compact />}
-          />
+          <div className="card">
+            <div className="flex items-center gap-2 mb-1.5">
+              <Volume2 className="h-3.5 w-3.5 text-ink-500" />
+              <Eyebrow>Input level</Eyebrow>
+            </div>
+            <LevelMeter rms={inputLevel.rms} peak={inputLevel.peak} active={phase === 'live'} compact />
+            <div className="mt-3">
+              <Waveform stream={inputStream} active={phase === 'live'} color="bg-accent-400" bars={48} className="h-9" />
+            </div>
+          </div>
 
           <div className="card">
-            <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-2">
-              Share
-            </h2>
-            <div className="font-mono text-xl tracking-widest text-ink-50">{joinCode}</div>
-            <div className="rounded-md bg-white p-2 inline-block mt-3">
-              <QRCodeSVG value={listenerUrl} size={140} />
+            <Eyebrow className="mb-2 flex items-center gap-1.5">
+              <Share2 className="h-3 w-3 text-ink-500" /> Share
+            </Eyebrow>
+            <div className="flex items-center gap-2">
+              <div className="font-mono text-xl tracking-[0.18em] text-ink-50">{joinCode}</div>
+              <CopyButton value={joinCode} label="" compact />
             </div>
-            <a href={listenerUrl} target="_blank" rel="noreferrer" className="btn btn-ghost mt-3 w-full text-xs">
-              Open listener page
+            <div className="rounded-lg bg-white p-2 inline-block mt-3">
+              <QRCodeSVG value={listenerUrl} size={148} />
+            </div>
+            <a href={listenerUrl} target="_blank" rel="noreferrer"
+               className="btn btn-ghost mt-3 w-full text-xs">
+              <ExternalLink className="h-3 w-3" /> Open listener page
             </a>
           </div>
 
           <div className="card">
-            <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-2">
-              Headset broadcast outputs
-            </h2>
-            <ul className="text-xs space-y-1">
+            <Eyebrow className="mb-2 flex items-center gap-1.5">
+              <Headphones className="h-3 w-3 text-ink-500" /> Headset broadcast
+            </Eyebrow>
+            <ul className="grid gap-1">
               {targetLangs.map((l) => (
-                <li key={l} className="flex items-center justify-between gap-2">
-                  <span className="truncate text-ink-300">{LANGUAGES_BY_CODE[l].englishName}</span>
-                  <a
-                    target="_blank"
-                    rel="noreferrer"
-                    href={`/broadcast/${joinCode}/${l}`}
-                    className="text-accent hover:underline"
-                  >
-                    open
+                <li key={l} className="flex items-center justify-between gap-2 py-1 border-b border-ink-800/60 last:border-0">
+                  <span className="text-xs text-ink-300 truncate">{LANGUAGES_BY_CODE[l].englishName}</span>
+                  <a target="_blank" rel="noreferrer" href={`/broadcast/${joinCode}/${l}`}
+                     className="text-[11px] text-accent-300 hover:underline inline-flex items-center gap-1">
+                    open <ExternalLink className="h-3 w-3" />
                   </a>
                 </li>
               ))}
             </ul>
-            <p className="mt-2 text-[10px] text-ink-500">
-              Pin one of these on a laptop wired into your FM/IR transmitter.
-            </p>
+            <Hint className="mt-2 !text-[10px]">
+              Pin a page on a laptop wired into your FM/IR transmitter.
+            </Hint>
           </div>
 
           <div className="card">
-            <h2 className="text-sm font-medium uppercase tracking-wider text-ink-400 mb-2">
-              Recordings
-            </h2>
+            <Eyebrow className="mb-2 flex items-center gap-1.5">
+              <Download className="h-3 w-3 text-ink-500" /> Recordings
+            </Eyebrow>
             <div className="grid gap-1 text-[11px]">
               <DownloadRow
                 label={`Source · ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`}
@@ -639,9 +702,6 @@ function OnAir(props: {
                 />
               ))}
             </div>
-            <p className="mt-2 text-[10px] text-ink-500">
-              Available during and ~5 min after the service.
-            </p>
           </div>
         </aside>
       </div>
@@ -650,27 +710,136 @@ function OnAir(props: {
 }
 
 // ============================================================================
-// Subcomponents
+// ENDED SUMMARY
 // ============================================================================
 
+function EndedSummary({
+  cfg, joinCode, serviceId, targetLangs, durationSec, costUSD, peakListeners,
+}: {
+  cfg: ServiceConfig;
+  joinCode: string;
+  serviceId: string;
+  targetLangs: LanguageCode[];
+  durationSec: number;
+  costUSD: number;
+  peakListeners: number;
+}) {
+  return (
+    <main className="mx-auto max-w-2xl px-5 py-10 md:py-14 animate-fade-in">
+      <span className="chip mb-5">
+        <Check className="h-3 w-3 text-emerald-400" /> Service ended
+      </span>
+      <h1 className="text-3xl md:text-4xl font-semibold tracking-tightish">
+        Nicely done.
+      </h1>
+      <p className="mt-2 text-ink-400">
+        Here&apos;s a quick recap. Recording downloads stay live for the next
+        five minutes.
+      </p>
+
+      <div className="mt-7 grid gap-3 sm:grid-cols-3">
+        <Stat label="Duration" value={fmtElapsed(durationSec)} />
+        <Stat label="Cost" value={`$${costUSD.toFixed(2)}`} sub={`cap $${cfg.costCapUSD}`} />
+        <Stat label="Peak listeners" value={String(peakListeners)} />
+      </div>
+
+      <div className="card mt-5">
+        <Eyebrow className="mb-3 flex items-center gap-1.5">
+          <FileText className="h-3 w-3" /> Downloads
+        </Eyebrow>
+        <div className="grid gap-1 text-sm">
+          <DownloadRow
+            label={`Source · ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`}
+            srtHref={recordingHref(serviceId, cfg.sourceLanguage, 'srt')}
+            vttHref={recordingHref(serviceId, cfg.sourceLanguage, 'vtt')}
+          />
+          {targetLangs.map((l) => (
+            <DownloadRow
+              key={l}
+              label={LANGUAGES_BY_CODE[l].englishName}
+              wavHref={recordingHref(serviceId, l, 'wav')}
+              srtHref={recordingHref(serviceId, l, 'srt')}
+              vttHref={recordingHref(serviceId, l, 'vtt')}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-7 flex flex-wrap gap-3">
+        <a href="/operator/new" className="btn btn-primary">
+          <Radio className="h-4 w-4" /> Start another service
+        </a>
+        <a href="/" className="btn btn-ghost">Back to home</a>
+      </div>
+
+      <p className="mt-8 text-[11px] text-ink-500">
+        Service code <span className="font-mono text-ink-300">{joinCode}</span>{' '}
+        is retired once downloads expire.
+      </p>
+    </main>
+  );
+}
+
+// ============================================================================
+// Reusable bits
+// ============================================================================
+
+function ProgressRail({
+  steps, active,
+}: {
+  steps: { key: Step; label: string; done: boolean }[];
+  active: Step;
+}) {
+  const idxActive = steps.findIndex((s) => s.key === active);
+  return (
+    <ol className="flex items-center gap-2">
+      {steps.map((s, i) => {
+        const isActive = i === idxActive;
+        return (
+          <li key={s.key} className="flex items-center gap-2 flex-1 last:flex-none">
+            <div className={cn(
+              'flex items-center gap-2 px-2.5 py-1 rounded-full text-[11px] transition-colors',
+              isActive ? 'bg-accent text-accent-fg' :
+              s.done   ? 'bg-emerald-500/15 text-emerald-300' :
+                         'bg-ink-900 text-ink-500',
+            )}>
+              {s.done ? <Check className="h-3 w-3" /> : <Circle className={cn('h-2 w-2', isActive ? 'fill-current' : '')} />}
+              {s.label}
+            </div>
+            {i < steps.length - 1 && (
+              <span className={cn(
+                'h-px flex-1',
+                steps[i + 1]?.done || i < idxActive ? 'bg-accent-700' : 'bg-ink-800',
+              )} />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function WizardStep({
-  n, title, done, open, disabled, onOpen, onContinue, continueLabel, children,
+  n, icon: Icon, title, tagline, done, open, disabled, onOpen, onContinue, children,
 }: {
   n: number;
+  icon: typeof Mic;
   title: string;
+  tagline?: string;
   done: boolean;
   open: boolean;
   disabled?: boolean;
   onOpen?: () => void;
   onContinue?: () => void;
-  continueLabel?: string;
   children: React.ReactNode;
 }) {
   return (
     <li
-      className={`rounded-2xl border transition overflow-hidden
-        ${open ? 'border-accent/50 bg-ink-900/70' : 'border-ink-800 bg-ink-900/40'}
-        ${disabled ? 'opacity-60' : ''}`}
+      className={cn(
+        'card-flush transition-all duration-200 ease-snap',
+        open ? 'border-accent-700/60 bg-ink-900/70' : 'hover:border-ink-700/80',
+        disabled && 'opacity-60',
+      )}
     >
       <button
         type="button"
@@ -678,23 +847,30 @@ function WizardStep({
         disabled={disabled}
         className="w-full flex items-center gap-3 px-5 py-4 text-left"
       >
-        <span
-          className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold
-            ${done ? 'bg-emerald-500/20 text-emerald-300'
-              : open ? 'bg-accent text-accent-fg'
-              : 'bg-ink-800 text-ink-300'}`}
-        >
-          {done ? '✓' : n}
+        <span className={cn(
+          'flex h-9 w-9 items-center justify-center rounded-xl ring-1 transition-colors',
+          done   ? 'bg-emerald-500/15 ring-emerald-500/40 text-emerald-300' :
+          open   ? 'bg-accent-900/40 ring-accent-700/60 text-accent-200' :
+                   'bg-ink-800 ring-ink-700/50 text-ink-400',
+        )}>
+          {done ? <Check className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
         </span>
-        <span className="font-medium">{title}</span>
-        {disabled && <span className="ml-auto text-xs text-ink-500">complete previous step</span>}
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium">Step {n} · {title}</div>
+          {tagline && <div className="text-[11px] text-ink-500 mt-0.5">{tagline}</div>}
+        </div>
+        {disabled && (
+          <span className="text-[10px] text-ink-500">complete previous step</span>
+        )}
       </button>
       {open && (
-        <div className="px-5 pb-5 pt-1">
+        <div className="px-5 pb-5 pt-1 animate-fade-in">
           {children}
           {onContinue && (
             <div className="mt-5 flex justify-end">
-              <button onClick={onContinue} className="btn btn-primary">{continueLabel ?? 'Continue'} →</button>
+              <Button variant="primary" onClick={onContinue} icon={ArrowRight}>
+                Continue
+              </Button>
             </div>
           )}
         </div>
@@ -703,62 +879,43 @@ function WizardStep({
   );
 }
 
-function MetricCard({
-  label, value, sub, barPct, valueComponent,
-}: {
-  label: string;
-  value?: string;
-  sub?: string;
-  barPct?: number;
-  valueComponent?: React.ReactNode;
-}) {
-  return (
-    <div className="card">
-      <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-500 mb-1">{label}</h2>
-      {valueComponent ?? <div className="text-3xl font-semibold tabular-nums">{value}</div>}
-      {sub && <div className="mt-1 text-[11px] text-ink-500">{sub}</div>}
-      {typeof barPct === 'number' && (
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink-800">
-          <div
-            className={`h-full transition-all ${
-              barPct > 90 ? 'bg-red-500' : barPct > 60 ? 'bg-amber-400' : 'bg-emerald-500'
-            }`}
-            style={{ width: `${Math.min(100, barPct)}%` }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CaptionPanelLg({
-  label, current, history, highlight, listeners, rtl,
+function CaptionPanel({
+  label, current, history, isSource, listeners, rtl,
 }: {
   label: string;
   current: string;
   history: string[];
-  highlight?: boolean;
+  isSource?: boolean;
   listeners?: number;
   rtl?: boolean;
 }) {
   return (
     <div
       dir={rtl ? 'rtl' : 'ltr'}
-      className={`card ${highlight ? 'border-accent/40 bg-accent/5' : ''}`}
+      className={cn('card', isSource && 'border-accent-700/40 bg-accent-900/10')}
     >
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs uppercase tracking-wider text-ink-400">{label}</span>
+        <Eyebrow>{label}</Eyebrow>
         {typeof listeners === 'number' && (
-          <span className="text-[11px] text-ink-500">{listeners} listening</span>
+          <span className="text-[11px] text-ink-500 inline-flex items-center gap-1">
+            <Users className="h-3 w-3" /> {listeners}
+          </span>
         )}
       </div>
-      <div className="text-lg md:text-xl leading-snug min-h-[2.5rem]">
-        {current || <span className="text-ink-700">…</span>}
+      <div className="text-lg md:text-xl leading-snug min-h-[2.6rem] text-pretty">
+        {current ? (
+          <span className="animate-fade-in">{current}</span>
+        ) : (
+          <span className="text-ink-700">
+            <Music className="inline-block h-4 w-4 mr-1 align-[-2px]" />
+            Listening…
+          </span>
+        )}
       </div>
       {history.length > 0 && (
-        <ul className="mt-3 space-y-1 text-sm text-ink-400 max-h-32 overflow-auto pr-1">
+        <ul className="mt-3 space-y-1 text-sm text-ink-400 max-h-32 overflow-auto pr-1 scroll-soft">
           {history.slice().reverse().map((h, i) => (
-            <li key={i} className="border-l-2 border-ink-800 pl-2">{h}</li>
+            <li key={i} className="border-l-2 border-ink-800 pl-2 leading-snug">{h}</li>
           ))}
         </ul>
       )}
@@ -768,14 +925,12 @@ function CaptionPanelLg({
 
 function DownloadRow({
   label, wavHref, srtHref, vttHref,
-}: {
-  label: string; wavHref?: string; srtHref?: string; vttHref?: string;
-}) {
+}: { label: string; wavHref?: string; srtHref?: string; vttHref?: string }) {
   return (
-    <div className="flex items-center justify-between gap-2 border-b border-ink-800/70 last:border-0 py-1.5">
+    <div className="flex items-center justify-between gap-2 border-b border-ink-800/60 last:border-0 py-1.5">
       <span className="text-ink-300 truncate">{label}</span>
       <div className="flex items-center gap-2">
-        {wavHref && <a className="text-accent hover:underline" href={wavHref} target="_blank" rel="noreferrer">wav</a>}
+        {wavHref && <a className="text-accent-300 hover:underline" href={wavHref} target="_blank" rel="noreferrer">wav</a>}
         {srtHref && <a className="text-ink-300 hover:text-ink-100 hover:underline" href={srtHref} target="_blank" rel="noreferrer">srt</a>}
         {vttHref && <a className="text-ink-300 hover:text-ink-100 hover:underline" href={vttHref} target="_blank" rel="noreferrer">vtt</a>}
       </div>
@@ -802,11 +957,14 @@ function LevelMeter({
           </span>
         </div>
       )}
-      <div className={`relative overflow-hidden rounded-full bg-ink-800 ${compact ? 'h-3' : 'h-2'}`}>
+      <div className={cn('relative overflow-hidden rounded-full bg-ink-800', compact ? 'h-3' : 'h-2')}>
         <div
-          className={`absolute inset-y-0 left-0 transition-[width] duration-75 ${
-            pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-emerald-500' : pct > 30 ? 'bg-emerald-500/80' : 'bg-emerald-600/50'
-          }`}
+          className={cn(
+            'absolute inset-y-0 left-0 transition-[width] duration-75',
+            pct > 90 ? 'bg-red-500' :
+            pct > 70 ? 'bg-emerald-500' :
+            pct > 30 ? 'bg-emerald-500/80' : 'bg-emerald-600/50',
+          )}
           style={{ width: `${pct}%` }}
         />
         <div className="absolute inset-y-0 w-[2px] bg-amber-300/80" style={{ left: `${peakPct}%` }} />
@@ -821,26 +979,20 @@ function LevelMeter({
   );
 }
 
-function ConnBadge({
-  conn, phase, compact,
-}: { conn: Conn; phase: Phase; compact?: boolean }) {
-  const dot =
-    phase === 'live' ? 'bg-emerald-400 animate-pulse'
-      : phase === 'paused' ? 'bg-amber-400'
-      : conn === 'open' ? 'bg-sky-400'
-      : conn === 'connecting' ? 'bg-sky-400 animate-pulse'
-      : 'bg-ink-600';
-  const text =
-    phase === 'live' ? 'LIVE'
-      : phase === 'paused' ? 'PAUSED'
-      : conn === 'open' ? 'READY'
-      : conn === 'connecting' ? 'CONNECTING'
-      : 'OFFLINE';
+function Hint({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border border-ink-800 bg-ink-900 ${compact ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-xs'} font-medium tracking-wide`}>
-      <span className={`h-2 w-2 rounded-full ${dot}`} />
-      {text}
-    </span>
+    <p className={cn('text-[11px] text-ink-500 leading-relaxed text-pretty', className)}>
+      {children}
+    </p>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-[11px] uppercase tracking-wider text-ink-500">{label}</span>
+      <span className={cn('text-sm', mono && 'font-mono tracking-widest')}>{value}</span>
+    </div>
   );
 }
 

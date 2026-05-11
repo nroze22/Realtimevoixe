@@ -4,30 +4,118 @@
 
 :root {
   color-scheme: dark;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
 }
 
 html, body {
-  @apply bg-ink-950 text-ink-100;
+  @apply bg-ink-950 text-ink-100 antialiased;
   font-feature-settings: 'cv11', 'ss01', 'ss03';
+  font-variant-ligatures: contextual common-ligatures;
+  text-rendering: optimizeLegibility;
 }
 
-.btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium
-         transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+body {
+  background-image:
+    radial-gradient(ellipse 1200px 600px at 50% -20%, rgba(124,92,255,0.10), transparent 60%),
+    radial-gradient(ellipse 800px 400px at 100% 100%, rgba(124,92,255,0.05), transparent 60%);
+  background-attachment: fixed;
 }
-.btn-primary { @apply bg-accent text-accent-fg hover:bg-accent/90; }
-.btn-ghost   { @apply text-ink-100 hover:bg-ink-800; }
-.btn-danger  { @apply bg-red-600 text-white hover:bg-red-500; }
-.btn-warn    { @apply bg-amber-500 text-ink-950 hover:bg-amber-400; }
 
-.card { @apply rounded-xl border border-ink-800 bg-ink-900/60 backdrop-blur p-5; }
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
-.field-label { @apply block text-xs font-medium uppercase tracking-wide text-ink-400 mb-1.5; }
-.field-input {
-  @apply w-full rounded-md border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-50
-         outline-none focus:border-accent focus:ring-1 focus:ring-accent;
+/* ==================== Component primitives ==================== */
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+           transition-[transform,background-color,color,box-shadow,border-color]
+           duration-150
+           disabled:cursor-not-allowed disabled:opacity-50
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950
+           active:scale-[0.98];
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .btn-primary {
+    @apply bg-accent text-accent-fg shadow-glow hover:bg-accent-400;
+  }
+  .btn-ghost {
+    @apply border border-ink-800 bg-ink-900/60 text-ink-100 hover:bg-ink-800 hover:border-ink-700;
+  }
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-500;
+  }
+  .btn-warn {
+    @apply bg-amber-500 text-ink-950 hover:bg-amber-400;
+  }
+  .btn-lg {
+    @apply h-12 px-5 text-base rounded-xl;
+  }
+
+  .card {
+    @apply rounded-2xl border border-ink-800 bg-ink-900/55 backdrop-blur-sm shadow-soft p-5;
+  }
+  .card-flush {
+    @apply rounded-2xl border border-ink-800 bg-ink-900/55 backdrop-blur-sm shadow-soft overflow-hidden;
+  }
+
+  .field-label {
+    @apply block text-[11px] font-medium uppercase tracking-[0.14em] text-ink-400 mb-1.5;
+  }
+  .field-input {
+    @apply w-full rounded-lg border border-ink-800 bg-ink-900/70 px-3 py-2.5 text-sm text-ink-50
+           outline-none transition-colors
+           placeholder:text-ink-600
+           hover:border-ink-700
+           focus:border-accent-500 focus:ring-2 focus:ring-accent/30;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-ink-800 bg-ink-900 px-2.5 py-1 text-xs text-ink-200;
+  }
+  .chip-on {
+    @apply border-accent-500 bg-accent text-accent-fg;
+  }
+
+  .kbd {
+    @apply rounded-md border border-ink-700 bg-ink-900 px-1.5 py-0.5 text-[10px] font-mono text-ink-300;
+  }
+
+  /* Live-data label — small, calm, all caps */
+  .eyebrow {
+    @apply text-[11px] uppercase tracking-[0.18em] text-ink-500;
+  }
+
+  /* Big numeric readout */
+  .readout {
+    @apply font-semibold tabular-nums tracking-tightish;
+  }
 }
-.chip {
-  @apply inline-flex items-center gap-1.5 rounded-full border border-ink-700 bg-ink-900 px-2.5 py-1 text-xs;
+
+/* ==================== Utilities ==================== */
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .text-pretty  { text-wrap: pretty; }
+
+  .grid-noise {
+    @apply bg-noise bg-repeat;
+  }
+
+  /* Subtle scrollbar */
+  .scroll-soft::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scroll-soft::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.06);
+    border-radius: 999px;
+  }
+  .scroll-soft::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.12);
+  }
 }
-.chip-on { @apply border-accent bg-accent text-accent-fg; }
