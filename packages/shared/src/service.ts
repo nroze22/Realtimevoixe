@@ -18,6 +18,27 @@ export const ServiceConfigSchema = z.object({
   costCapUSD: z.number().positive().default(30),
   /** Whether to enable the Whisper source-captions sidecar. */
   enableCaptions: z.boolean().default(true),
+  /**
+   * Free-form pronunciation / terminology guide. Names, scripture refs, church
+   * program names that should be preserved or transliterated specifically.
+   * Surfaced in the operator UI and (when the realtime model supports custom
+   * instructions) forwarded to the session.
+   */
+  pronunciationGuide: z.string().max(2000).optional(),
+  /**
+   * Configured speakers (pastor + worship leader + guest, etc.). The
+   * operator chooses one as "now speaking" during the service.
+   */
+  speakers: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string().min(1).max(80),
+        role: z.string().max(40).optional(),
+      }),
+    )
+    .max(8)
+    .optional(),
 });
 
 export type ServiceConfig = z.infer<typeof ServiceConfigSchema>;

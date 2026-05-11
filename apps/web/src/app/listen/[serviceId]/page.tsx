@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import {
-  ArrowLeft, Headphones, Pause as PauseIcon, Play, Type, Volume2,
+  AlertTriangle, ArrowLeft, Clock, Headphones, Pause as PauseIcon, Play, RefreshCw,
+  Type, Volume2,
 } from 'lucide-react';
 import {
   LANGUAGES_BY_CODE,
@@ -13,6 +14,8 @@ import {
 import { fetchListenerToken } from '@/lib/orchestrator';
 import { ListenerSession, type ListenerCaption } from '@/lib/listener';
 import { Waveform } from '@/components/waveform';
+import { MissedDrawer } from '@/components/missed-drawer';
+import { annotateScripture } from '@/lib/bible';
 import { cn } from '@/lib/cn';
 
 type Phase = 'choose-language' | 'connecting' | 'listening' | 'error' | 'ended';
@@ -43,6 +46,10 @@ export default function ListenerPage() {
   const [bigText, setBigText] = useState(false);
   const [captionStream, setCaptionStream] = useState<MediaStream | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [missedOpen, setMissedOpen] = useState(false);
+  const [headphonesOk, setHeadphonesOk] = useState<boolean | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const startMsRef = useRef<number>(0);
 
   const browserLang = useMemo<LanguageCode | null>(() => {
     if (typeof navigator === 'undefined') return null;
@@ -76,6 +83,8 @@ export default function ListenerPage() {
     setCaptions([]);
     lastCaptionsRef.current = [];
     setCaptionStream(null);
+    setReconnecting(false);
+    startMsRef.current = Date.now();
     localStorage.setItem(`rtv:lang:${serviceId}`, lang);
 
     try {
@@ -106,7 +115,10 @@ export default function ListenerPage() {
           lastCaptionsRef.current = [...lastCaptionsRef.current.slice(-30), c];
           setCaptions(lastCaptionsRef.current);
         },
-        onConnectionQuality: setQuality,
+        onConnectionQuality: (q) => {
+          setQuality(q);
+          setReconnecting(q === 'lost');
+        },
         onDisconnected: () => setPhase('ended'),
         onError: (m) => { setError(m); setPhase('error'); },
       });
@@ -149,6 +161,35 @@ export default function ListenerPage() {
       el.removeEventListener('pause', onPause);
     };
   });
+
+  // Heuristic headphone-output detection. The Audio Output Devices API isn't
+  // available on iOS Safari, so we fall back to a best-effort check: if we
+  // can enumerate any output device whose label hints at "headphones",
+  // "airpods", or "earbuds", assume they're plugged in. Otherwise show a
+  // friendly nudge.
+  useEffect(() => {
+    if (phase !== 'listening' || needsUnmute) return;
+    let cancelled = false;
+    async function probe() {
+      try {
+        if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+          setHeadphonesOk(null);
+          return;
+        }
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const outputs = devs.filter((d) => d.kind === 'audiooutput');
+        const headphoneLike = outputs.some((d) => {
+          const l = (d.label || '').toLowerCase();
+          return /headphone|earbud|airpod|earphone|bluetooth|usb audio|line|external/.test(l);
+        });
+        if (!cancelled) setHeadphonesOk(headphoneLike || outputs.length > 1);
+      } catch {
+        if (!cancelled) setHeadphonesOk(null);
+      }
+    }
+    void probe();
+    return () => { cancelled = true; };
+  }, [phase, needsUnmute]);
 
   useEffect(() => () => {
     void sessionRef.current?.disconnect();
@@ -257,8 +298,33 @@ export default function ListenerPage() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Change language
         </button>
-        <ConnectionBars quality={quality} />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setMissedOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.02] px-2.5 py-1 text-[11px] text-ink-300 hover:bg-white/[0.06] hover:border-white/[0.12] transition"
+            disabled={captions.length === 0}
+            aria-label="What I missed"
+          >
+            <Clock className="h-3 w-3" /> Recap
+          </button>
+          <ConnectionBars quality={quality} />
+        </div>
       </header>
+
+      {/* Headphone hint banner */}
+      {headphonesOk === false && phase === 'listening' && !needsUnmute && (
+        <div className="mx-5 mt-1 mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 flex items-center gap-2 text-[12px] text-amber-100 animate-fade-in">
+          <Headphones className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="flex-1 leading-snug">Plug in earbuds so you don&apos;t interrupt the service around you.</span>
+          <button
+            onClick={() => setHeadphonesOk(true)}
+            className="text-amber-200/80 hover:text-amber-100 text-[11px] px-1.5 py-0.5"
+            aria-label="Dismiss"
+          >
+            Got it
+          </button>
+        </div>
+      )}
 
       {/* Hero */}
       <section className="px-5 mt-1">
@@ -380,6 +446,25 @@ export default function ListenerPage() {
           Lock your phone — translation keeps playing in your earbuds.
         </p>
       </footer>
+
+      <MissedDrawer
+        open={missedOpen}
+        onClose={() => setMissedOpen(false)}
+        captions={captions}
+        startMs={startMsRef.current}
+      />
+
+      {reconnecting && (
+        <div className="absolute inset-x-0 top-0 z-50 m-3 rounded-xl border border-white/[0.08] bg-ink-900/90 backdrop-blur-md px-4 py-3 shadow-[0_24px_60px_-24px_rgba(0,0,0,0.7)] flex items-center gap-3 animate-fade-in">
+          <RefreshCw className="h-4 w-4 text-amber-300 animate-spin" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium text-ink-50">Reconnecting…</div>
+            <div className="text-[11px] text-ink-400 leading-snug">
+              Network dropped briefly. We&apos;ll catch you up.
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -430,7 +515,7 @@ function CaptionStack({
             'text-ink-400 leading-snug text-pretty transition-opacity duration-300',
             big ? 'text-lg' : 'text-base',
           )}>
-            {c.text}
+            <ScriptureText text={c.text} />
           </li>
         ))}
         <li
@@ -440,10 +525,33 @@ function CaptionStack({
             big ? 'text-3xl' : 'text-2xl',
           )}
         >
-          {last.text}
+          <ScriptureText text={last.text} />
         </li>
       </ul>
     </div>
+  );
+}
+
+function ScriptureText({ text }: { text: string }) {
+  const parts = annotateScripture(text);
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.type === 'text' ? (
+          <span key={i}>{p.text}</span>
+        ) : (
+          <a
+            key={i}
+            href={p.href}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent-300 underline decoration-accent-700/60 underline-offset-2 hover:decoration-accent-400 transition-colors"
+          >
+            {p.text}
+          </a>
+        ),
+      )}
+    </>
   );
 }
 

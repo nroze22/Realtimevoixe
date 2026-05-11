@@ -15,13 +15,20 @@ import {
   FileText,
   Headphones,
   Keyboard,
+  Mail,
   Mic,
+  NotebookPen,
   Pause as PauseIcon,
   Play,
   Radio,
   Share2,
+  Signal,
+  SignalLow,
+  SignalMedium,
   Square,
+  UserCircle2,
   Users,
+  VolumeX,
   Volume2,
   Music,
 } from 'lucide-react';
@@ -45,6 +52,7 @@ import { ChannelStrip } from '@/components/channel-strip';
 import { CommandPalette, type CommandItem } from '@/components/command-palette';
 import { Logo } from '@/components/logo';
 import { useToast } from '@/components/toast';
+import { getNotes, recordRecent, setNotes } from '@/lib/templates';
 
 interface StoredService {
   config: ServiceConfig;
@@ -86,9 +94,17 @@ export default function OperatorConsole() {
   const [inputStream, setInputStream] = useState<MediaStream | null>(null);
   const [outputStreams, setOutputStreams] = useState<Record<string, MediaStream>>({});
   const [cmdOpen, setCmdOpen] = useState(false);
+  /** Active speaker id. Switches between configured speakers + pastor default. */
+  const [activeSpeakerId, setActiveSpeakerId] = useState<string>('default');
+  /** Operator notes (running order); persisted in localStorage. */
+  const [notes, setNotesState] = useState('');
   const [endedSummary, setEndedSummary] = useState<null | {
-    durationSec: number; costUSD: number; peakListeners: number;
+    durationSec: number; costUSD: number; peakListeners: number; listenerMinutes: number;
   }>(null);
+
+  /** Accumulates listener-minutes for the post-service report. */
+  const listenerMinutesRef = useRef(0);
+  const lastListenerSampleRef = useRef<number>(0);
 
   const toast = useToast();
 
@@ -147,7 +163,27 @@ export default function OperatorConsole() {
 
   useEffect(() => {
     peakListenersRef.current = Math.max(peakListenersRef.current, listeners.total);
+
+    // Listener-minutes accounting: every time the listener count changes,
+    // add (now - lastSample) * priorTotal to the running tally. Sampled at
+    // 5s interval via the orchestrator's listener.count message.
+    const now = Date.now();
+    if (lastListenerSampleRef.current === 0) {
+      lastListenerSampleRef.current = now;
+      return;
+    }
+    const deltaMin = (now - lastListenerSampleRef.current) / 60_000;
+    listenerMinutesRef.current += deltaMin * listeners.total;
+    lastListenerSampleRef.current = now;
   }, [listeners.total]);
+
+  // Load + persist notes per service.
+  useEffect(() => {
+    setNotesState(getNotes(serviceId));
+  }, [serviceId]);
+  useEffect(() => {
+    if (notes !== undefined) setNotes(serviceId, notes);
+  }, [serviceId, notes]);
 
   // ---------- WS message router ----------
   const handleMessage = useCallback((msg: OrchestratorMessage) => {
@@ -161,6 +197,7 @@ export default function OperatorConsole() {
             durationSec: elapsedSec,
             costUSD: cost?.costUSD ?? 0,
             peakListeners: peakListenersRef.current,
+            listenerMinutes: Math.round(listenerMinutesRef.current),
           });
         }
         break;
@@ -248,11 +285,30 @@ export default function OperatorConsole() {
   function onPause()  { engineRef.current?.send({ type: 'pause' }); }
   function onResume() { engineRef.current?.send({ type: 'resume' }); }
   async function onStop() {
-    setEndedSummary({
+    const summary = {
       durationSec: elapsedSec,
       costUSD: cost?.costUSD ?? 0,
       peakListeners: peakListenersRef.current,
-    });
+      listenerMinutes: Math.round(listenerMinutesRef.current),
+    };
+    setEndedSummary(summary);
+
+    if (stored) {
+      recordRecent({
+        serviceId,
+        joinCode: stored.joinCode,
+        title: stored.config.title,
+        pastorName: stored.config.pastorName,
+        sourceLanguage: stored.config.sourceLanguage,
+        targetLanguages: stored.config.targetLanguages,
+        startedAt: Date.now() - summary.durationSec * 1000,
+        endedAt: Date.now(),
+        durationSec: summary.durationSec,
+        costUSD: summary.costUSD,
+        peakListeners: summary.peakListeners,
+      });
+    }
+
     engineRef.current?.send({ type: 'stop' });
     await publisherRef.current?.disconnect();
     await engineRef.current?.close();
@@ -335,6 +391,10 @@ export default function OperatorConsole() {
         serviceId={serviceId}
         cmdOpen={cmdOpen}
         setCmdOpen={setCmdOpen}
+        activeSpeakerId={activeSpeakerId}
+        setActiveSpeakerId={setActiveSpeakerId}
+        notes={notes}
+        setNotes={setNotesState}
         onPause={onPause}
         onResume={onResume}
         onStop={onStop}
@@ -353,6 +413,8 @@ export default function OperatorConsole() {
         durationSec={endedSummary.durationSec}
         costUSD={endedSummary.costUSD}
         peakListeners={endedSummary.peakListeners}
+        listenerMinutes={endedSummary.listenerMinutes}
+        notes={notes}
       />
     );
   }
@@ -572,6 +634,10 @@ function OnAir(props: {
   serviceId: string;
   cmdOpen: boolean;
   setCmdOpen: (v: boolean) => void;
+  activeSpeakerId: string;
+  setActiveSpeakerId: (id: string) => void;
+  notes: string;
+  setNotes: (v: string) => void;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
@@ -581,8 +647,28 @@ function OnAir(props: {
     cfg, joinCode, listenerUrl, targetLangs, phase, conn, elapsedSec, cost,
     capReached, capWarning, listeners, captionsByLang, historyByLang,
     inputLevel, inputStream, outputStreams, serviceId, cmdOpen, setCmdOpen,
+    activeSpeakerId, setActiveSpeakerId, notes, setNotes,
     onPause, onResume, onStop, toastSuccess,
   } = props;
+
+  // Smart silence detection — input RMS below threshold for 5+ seconds.
+  const [silentSec, setSilentSec] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (phase !== 'live') { setSilentSec(0); return; }
+      const quiet = inputLevel.rms < 0.005; // ~ -46 dBFS
+      setSilentSec((s) => (quiet ? s + 1 : 0));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase, inputLevel.rms]);
+  const isSilent = silentSec >= 5;
+
+  // Speakers picker — pastor name + configured speakers.
+  const speakerOptions = [
+    { id: 'default', name: cfg.pastorName || 'Speaker', role: 'default' },
+    ...(cfg.speakers ?? []).map((s) => ({ id: s.id, name: s.name, role: s.role })),
+  ];
+  const activeSpeaker = speakerOptions.find((s) => s.id === activeSpeakerId) ?? speakerOptions[0];
 
   // ---------- Command palette items ----------
   const cmdItems: CommandItem[] = [
@@ -666,8 +752,23 @@ function OnAir(props: {
             pulse={phase === 'live'}
           />
           <span className="readout text-sm text-ink-300">{fmtElapsed(elapsedSec)}</span>
+          {isSilent && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-100">
+              <VolumeX className="h-3 w-3" />
+              Silent · {silentSec}s
+            </span>
+          )}
           <div className="flex-1 min-w-0 truncate text-sm text-ink-300">
-            {cfg.title}
+            <span className="text-ink-500">·</span> {cfg.title}
+            {activeSpeaker && (
+              <span className="hidden lg:inline-flex items-center gap-1 ml-3 text-[12px] text-ink-400">
+                <UserCircle2 className="h-3 w-3" />
+                {activeSpeaker.name}
+                {activeSpeaker.role && activeSpeaker.role !== 'default' && (
+                  <span className="text-ink-600">· {activeSpeaker.role}</span>
+                )}
+              </span>
+            )}
           </div>
           <div className="hidden md:block w-40">
             <Waveform stream={inputStream} active color="bg-emerald-400" bars={28} className="h-7" />
@@ -790,6 +891,68 @@ function OnAir(props: {
             </Hint>
           </div>
 
+          {/* Speaker switcher */}
+          {speakerOptions.length > 1 && (
+            <div className="card">
+              <Eyebrow className="mb-2 flex items-center gap-1.5">
+                <UserCircle2 className="h-3 w-3 text-ink-500" /> Now speaking
+              </Eyebrow>
+              <div className="grid gap-1.5">
+                {speakerOptions.map((s) => {
+                  const on = s.id === activeSpeakerId;
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => setActiveSpeakerId(s.id)}
+                      className={cn(
+                        'flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-sm transition',
+                        on
+                          ? 'border-accent-500 bg-accent-900/30 text-ink-50'
+                          : 'border-white/[0.06] bg-white/[0.02] text-ink-300 hover:bg-white/[0.05]'
+                      )}
+                    >
+                      <span className="truncate">{s.name}</span>
+                      {s.role && s.role !== 'default' && (
+                        <span className="text-[10px] text-ink-500 truncate">{s.role}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-[10px] text-ink-500 leading-relaxed">
+                Tagged for the post-service report and recording metadata.
+              </p>
+            </div>
+          )}
+
+          {/* Operator notes */}
+          <div className="card">
+            <Eyebrow className="mb-2 flex items-center gap-1.5">
+              <NotebookPen className="h-3 w-3 text-ink-500" /> Notes
+            </Eyebrow>
+            <textarea
+              rows={4}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g.&#10;10:15 communion&#10;10:30 pastor's prayer (silence ok)&#10;10:45 final song"
+              className="w-full bg-transparent text-sm text-ink-100 placeholder:text-ink-600 outline-none resize-none leading-relaxed"
+            />
+            <p className="mt-1 text-[10px] text-ink-500">
+              Saved locally · attached to the post-service report.
+            </p>
+          </div>
+
+          {cfg.pronunciationGuide && (
+            <div className="card">
+              <Eyebrow className="mb-2 flex items-center gap-1.5">
+                <Mic className="h-3 w-3 text-ink-500" /> Pronunciation guide
+              </Eyebrow>
+              <pre className="text-[11px] text-ink-300 whitespace-pre-wrap leading-relaxed font-sans">
+                {cfg.pronunciationGuide}
+              </pre>
+            </div>
+          )}
+
           <div className="card">
             <Eyebrow className="mb-2 flex items-center gap-1.5">
               <Download className="h-3 w-3 text-ink-500" /> Recordings
@@ -874,7 +1037,7 @@ function SourceCaption({
 // ============================================================================
 
 function EndedSummary({
-  cfg, joinCode, serviceId, targetLangs, durationSec, costUSD, peakListeners,
+  cfg, joinCode, serviceId, targetLangs, durationSec, costUSD, peakListeners, listenerMinutes, notes,
 }: {
   cfg: ServiceConfig;
   joinCode: string;
@@ -883,7 +1046,31 @@ function EndedSummary({
   durationSec: number;
   costUSD: number;
   peakListeners: number;
+  listenerMinutes: number;
+  notes: string;
 }) {
+  const costPerListenerMin = listenerMinutes > 0 ? costUSD / listenerMinutes : null;
+
+  const reportBody = useMemo(() => {
+    const lines = [
+      `Service: ${cfg.title}`,
+      cfg.pastorName ? `Speaker: ${cfg.pastorName}` : '',
+      `Duration: ${fmtElapsed(durationSec)}`,
+      `Source language: ${LANGUAGES_BY_CODE[cfg.sourceLanguage as LanguageCode].englishName}`,
+      `Translated to: ${targetLangs.map((c) => LANGUAGES_BY_CODE[c].englishName).join(', ')}`,
+      ``,
+      `Listeners (peak concurrent): ${peakListeners}`,
+      `Listener-minutes served: ${listenerMinutes}`,
+      `Cost: $${costUSD.toFixed(2)} (cap $${cfg.costCapUSD})`,
+      costPerListenerMin ? `Cost / listener-minute: $${costPerListenerMin.toFixed(4)}` : '',
+      ``,
+      notes ? `Notes:\n${notes}` : '',
+    ].filter(Boolean);
+    return lines.join('\n');
+  }, [cfg, durationSec, peakListeners, listenerMinutes, costUSD, costPerListenerMin, notes, targetLangs]);
+
+  const mailto = `mailto:?subject=${encodeURIComponent(`Service report: ${cfg.title}`)}&body=${encodeURIComponent(reportBody)}`;
+
   return (
     <main className="mx-auto max-w-2xl px-5 py-10 md:py-14 animate-fade-in">
       <span className="chip mb-5">
@@ -893,14 +1080,20 @@ function EndedSummary({
         Nicely done.
       </h1>
       <p className="mt-2 text-ink-400">
-        Here&apos;s a quick recap. Recording downloads stay live for the next
-        five minutes.
+        Here&apos;s a quick recap. Recording downloads stay live for the next five minutes.
       </p>
 
-      <div className="mt-7 grid gap-3 sm:grid-cols-3">
+      <div className="mt-7 grid gap-3 sm:grid-cols-2">
         <Stat label="Duration" value={fmtElapsed(durationSec)} />
-        <Stat label="Cost" value={`$${costUSD.toFixed(2)}`} sub={`cap $${cfg.costCapUSD}`} />
-        <Stat label="Peak listeners" value={String(peakListeners)} />
+        <Stat
+          label="Cost"
+          value={`$${costUSD.toFixed(2)}`}
+          sub={costPerListenerMin
+            ? `cap $${cfg.costCapUSD} · $${costPerListenerMin.toFixed(4)} / listener-min`
+            : `cap $${cfg.costCapUSD}`}
+        />
+        <Stat label="Peak listeners" value={String(peakListeners)} sub="concurrent" />
+        <Stat label="Listener-minutes" value={listenerMinutes.toLocaleString()} sub="served across all languages" />
       </div>
 
       <div className="card mt-5">
@@ -925,11 +1118,23 @@ function EndedSummary({
         </div>
       </div>
 
+      {notes && (
+        <div className="card mt-5">
+          <Eyebrow className="mb-2 flex items-center gap-1.5">
+            <NotebookPen className="h-3 w-3" /> Notes from the service
+          </Eyebrow>
+          <pre className="text-sm text-ink-300 whitespace-pre-wrap leading-relaxed font-sans">{notes}</pre>
+        </div>
+      )}
+
       <div className="mt-7 flex flex-wrap gap-3">
         <a href="/operator/new" className="btn btn-primary">
           <Radio className="h-4 w-4" /> Start another service
         </a>
-        <a href="/" className="btn btn-ghost">Back to home</a>
+        <a href={mailto} className="btn btn-ghost">
+          <Mail className="h-4 w-4" /> Email this report
+        </a>
+        <a href="/operator" className="btn btn-ghost">All services</a>
       </div>
 
       <p className="mt-8 text-[11px] text-ink-500">
