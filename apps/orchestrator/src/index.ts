@@ -24,6 +24,64 @@ async function main() {
   fastify.get('/health', async () => ({ ok: true, service: 'orchestrator' }));
 
   /**
+   * Deep health check. Pings OpenAI (model list) and LiveKit (list rooms) and
+   * reports per-service latency so the operator wizard can show a clear
+   * green-light or surface the actual failure mode before going live.
+   */
+  fastify.get('/health/deep', async () => {
+    const out: {
+      ok: boolean;
+      openai: { ok: boolean; latencyMs: number; error?: string };
+      livekit: { ok: boolean; latencyMs: number; error?: string };
+    } = {
+      ok: false,
+      openai: { ok: false, latencyMs: 0 },
+      livekit: { ok: false, latencyMs: 0 },
+    };
+
+    // OpenAI: tiny GET to /v1/models. ~250ms typical, 5s timeout.
+    {
+      const t0 = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const tm = setTimeout(() => ctrl.abort(), 5000);
+        const res = await fetch('https://api.openai.com/v1/models', {
+          headers: { Authorization: `Bearer ${e.OPENAI_API_KEY}` },
+          signal: ctrl.signal,
+        });
+        clearTimeout(tm);
+        out.openai.latencyMs = Date.now() - t0;
+        if (res.ok) out.openai.ok = true;
+        else out.openai.error = `${res.status} ${res.statusText}`;
+      } catch (err) {
+        out.openai.latencyMs = Date.now() - t0;
+        out.openai.error = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    // LiveKit: list rooms (cheapest call that proves the key works).
+    {
+      const t0 = Date.now();
+      try {
+        const httpUrl = e.LIVEKIT_URL.replace(/^wss?:/i, (m) =>
+          m.toLowerCase() === 'wss:' ? 'https:' : 'http:',
+        );
+        const { RoomServiceClient } = await import('livekit-server-sdk');
+        const svc = new RoomServiceClient(httpUrl, e.LIVEKIT_API_KEY, e.LIVEKIT_API_SECRET);
+        await svc.listRooms();
+        out.livekit.latencyMs = Date.now() - t0;
+        out.livekit.ok = true;
+      } catch (err) {
+        out.livekit.latencyMs = Date.now() - t0;
+        out.livekit.error = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    out.ok = out.openai.ok && out.livekit.ok;
+    return out;
+  });
+
+  /**
    * Create a service session and return its LiveKit room name + operator token.
    * The operator browser uses this token to publish per-language audio tracks
    * back into the room. Listeners use /listener-token to subscribe.
@@ -201,6 +259,14 @@ async function main() {
         break;
       case 'cap.raise':
         session.raiseCap(msg.addUSD);
+        break;
+      case 'audio.silent':
+        session.setSilenceGated(msg.silent);
+        break;
+      case 'ping':
+        session.notePing();
+        // Respond immediately so the operator can measure RTT.
+        session.sendToOperatorRaw({ type: 'pong', ts: msg.ts });
         break;
       case 'audio.meta':
         // Track expected sample rate, currently informational.

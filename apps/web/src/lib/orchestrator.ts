@@ -46,6 +46,18 @@ export async function fetchListenerToken(
   return res.json();
 }
 
+export interface DeepHealth {
+  ok: boolean;
+  openai: { ok: boolean; latencyMs: number; error?: string };
+  livekit: { ok: boolean; latencyMs: number; error?: string };
+}
+
+export async function fetchDeepHealth(): Promise<DeepHealth> {
+  const res = await fetch(`${HTTP}/health/deep`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`health check failed (${res.status})`);
+  return res.json();
+}
+
 export function operatorWsUrl(serviceId: string): string {
   return `${WS}/ws/operator/${encodeURIComponent(serviceId)}`;
 }

@@ -46,6 +46,17 @@ export class ServiceSession extends EventEmitter {
   private sourceBuffer = '';
   public readonly recorder: ServiceRecorder;
 
+  /** ---- Reliability state ---- */
+  /** Per-language restart attempt counters + scheduled timers. */
+  private restartAttempts = new Map<LanguageCode, number>();
+  private restartTimers = new Map<LanguageCode, NodeJS.Timeout>();
+  /** Smart-silence gating: when true, we don't forward audio to OpenAI. */
+  private silenceGated = false;
+  /** Heartbeat tracking — operator must ping at least every 30s. */
+  private lastPingAt = 0;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private static OPERATOR_TIMEOUT_MS = 60_000;
+
   constructor(
     public readonly config: ServiceConfig,
     livekitRoomName: string,
@@ -97,8 +108,49 @@ export class ServiceSession extends EventEmitter {
 
     this.costInterval = setInterval(() => this.publishCost(), 1000);
     this.listenerInterval = setInterval(() => void this.pollListeners(), 5000);
+    this.lastPingAt = Date.now();
+    this.heartbeatInterval = setInterval(() => this.checkHeartbeat(), 5000);
     void this.pollListeners();
     this.transition('live');
+  }
+
+  /** Operator's WS sent a ping; remember when. */
+  notePing(): void {
+    this.lastPingAt = Date.now();
+  }
+
+  /** Smart-silence gating from the operator browser. */
+  setSilenceGated(silent: boolean): void {
+    if (this.silenceGated === silent) return;
+    this.silenceGated = silent;
+    this.sendToOperator({ type: 'silence.gating', paused: silent });
+    if (silent) {
+      // Commit anything outstanding so we don't leave pending tokens dangling.
+      for (const ts of this.sessions.values()) ts.flush();
+    }
+    log.debug({ silent, serviceId: this.config.serviceId }, 'silence gating changed');
+  }
+
+  private checkHeartbeat(): void {
+    if (this.state.status !== 'live') return;
+    const since = Date.now() - this.lastPingAt;
+    if (since > ServiceSession.OPERATOR_TIMEOUT_MS) {
+      log.warn({ serviceId: this.config.serviceId, since }, 'operator heartbeat lost, auto-stopping');
+      this.sendToOperator({
+        type: 'log',
+        level: 'warn',
+        message: 'Operator heartbeat lost — auto-stopping to protect cost.',
+        tMs: this.now(),
+      });
+      void this.stop();
+    } else if (since > 30_000) {
+      this.sendToOperator({
+        type: 'log',
+        level: 'warn',
+        message: `Operator unresponsive · ${Math.round(since / 1000)}s`,
+        tMs: this.now(),
+      });
+    }
   }
 
   private async pollListeners(): Promise<void> {
@@ -194,6 +246,11 @@ export class ServiceSession extends EventEmitter {
 
     ts.on('closed', () => {
       this.sessions.delete(lang);
+      // Auto-restart if the service is still live (not stopped intentionally).
+      if (this.state.status === 'live' || this.state.status === 'paused') {
+        this.recorder.markGap(lang, this.now(), 'reconnecting');
+        this.scheduleLanguageRestart(lang);
+      }
     });
 
     await ts.start();
@@ -204,10 +261,56 @@ export class ServiceSession extends EventEmitter {
     this.sendToOperator({ type: 'log', level: 'info', message: `Translation session opened: ${lang}`, tMs: this.now() });
   }
 
+  private scheduleLanguageRestart(lang: LanguageCode): void {
+    // Cancel any prior pending restart for this language.
+    const existing = this.restartTimers.get(lang);
+    if (existing) clearTimeout(existing);
+
+    const attempt = (this.restartAttempts.get(lang) ?? 0) + 1;
+    this.restartAttempts.set(lang, attempt);
+    if (attempt > 5) {
+      log.error({ lang, serviceId: this.config.serviceId }, 'giving up restart');
+      this.sendToOperator({
+        type: 'log',
+        level: 'error',
+        message: `[${lang}] Translation session failed repeatedly — giving up. Pause + resume to retry.`,
+        tMs: this.now(),
+      });
+      return;
+    }
+
+    // Exponential backoff: 2s, 4s, 8s, 16s, 30s.
+    const delayMs = Math.min(30_000, 2_000 * Math.pow(2, attempt - 1));
+    this.sendToOperator({ type: 'language.restart', language: lang, attempt, nextDelayMs: delayMs });
+    log.warn({ lang, attempt, delayMs }, 'scheduling translate-session restart');
+
+    const t = setTimeout(async () => {
+      this.restartTimers.delete(lang);
+      if (this.state.status !== 'live' && this.state.status !== 'paused') return;
+      try {
+        await this.openLanguage(lang);
+        // Reset attempt counter after a successful open.
+        this.restartAttempts.set(lang, 0);
+        this.sendToOperator({
+          type: 'log',
+          level: 'info',
+          message: `[${lang}] Translation session recovered.`,
+          tMs: this.now(),
+        });
+      } catch (err) {
+        log.error({ err, lang }, 'restart attempt failed');
+        this.scheduleLanguageRestart(lang); // chain to next backoff
+      }
+    }, delayMs);
+    this.restartTimers.set(lang, t);
+  }
+
   appendInputAudio(pcm16: Buffer): void {
     if (this.state.status !== 'live' && this.state.status !== 'paused') return;
     if (this.state.status === 'paused') return;
     if (this.state.capReached) return;
+    // Smart silence: when the operator says it's silent, don't burn API tokens.
+    if (this.silenceGated) return;
     for (const ts of this.sessions.values()) {
       ts.appendAudio(pcm16);
     }
@@ -245,8 +348,16 @@ export class ServiceSession extends EventEmitter {
       clearInterval(this.listenerInterval);
       this.listenerInterval = null;
     }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    for (const t of this.restartTimers.values()) clearTimeout(t);
+    this.restartTimers.clear();
     for (const ts of this.sessions.values()) ts.close();
     this.sessions.clear();
+    // Finalize recordings so downloads work right after stop.
+    await this.recorder.finalize();
     this.state.endedAt = Date.now();
     this.transition('stopped');
     this.emit('ended');
@@ -307,6 +418,11 @@ export class ServiceSession extends EventEmitter {
     } catch (err) {
       log.warn({ err }, 'failed to send op message');
     }
+  }
+
+  /** External accessor so the WS handler can send back pongs without re-importing types. */
+  sendToOperatorRaw(msg: OrchestratorMessage): void {
+    this.sendToOperator(msg);
   }
 
   /**

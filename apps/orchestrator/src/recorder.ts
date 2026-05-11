@@ -20,6 +20,8 @@ interface LangRecording {
   pcmStream: fs.WriteStream;
   pcmPath: string;
   captions: Caption[];
+  /** Last byte offset we hinted fdatasync at — used for periodic flushes. */
+  lastFsyncBytes: number;
 }
 
 /**
@@ -48,6 +50,7 @@ export class ServiceRecorder {
         pcmStream: fs.createWriteStream(pcmPath, { flags: 'w' }),
         pcmPath,
         captions: [],
+        lastFsyncBytes: 0,
       };
       this.langs.set(lang, rec);
     }
@@ -56,6 +59,21 @@ export class ServiceRecorder {
     const chunk = pcm16.byteLength > remaining ? pcm16.subarray(0, remaining) : pcm16;
     rec.pcmStream.write(chunk);
     rec.pcmBytes += chunk.byteLength;
+
+    // Periodic fsync hint — every ~5s of 24kHz mono PCM16 (~240KB) we flush
+    // the OS buffer so a crash loses ≤5s of audio, not the whole service.
+    if (rec.pcmBytes - rec.lastFsyncBytes >= 240_000) {
+      rec.lastFsyncBytes = rec.pcmBytes;
+      const fd = (rec.pcmStream as any).fd as number | undefined;
+      if (typeof fd === 'number') {
+        fs.fdatasync(fd, () => {/* best-effort */});
+      }
+    }
+  }
+
+  /** Mark a discontinuity in the audio + captions (e.g., translate-session restart). */
+  markGap(lang: LanguageCode, tMs: number, reason: string): void {
+    this.appendCaption('target', lang, tMs, `[${reason}]`);
   }
 
   appendCaption(kind: 'source' | 'target', lang: LanguageCode, tMs: number, text: string): void {
@@ -75,6 +93,7 @@ export class ServiceRecorder {
         pcmStream: fs.createWriteStream(pcmPath, { flags: 'w' }),
         pcmPath,
         captions: [],
+        lastFsyncBytes: 0,
       };
       this.langs.set(lang, rec);
     }

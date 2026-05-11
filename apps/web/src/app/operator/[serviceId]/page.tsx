@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import {
+  Activity,
+  AlertTriangle,
   ArrowRight,
   Cable,
   Check,
@@ -13,18 +15,20 @@ import {
   DollarSign,
   Download,
   ExternalLink,
+  EyeOff,
   FileText,
   Headphones,
+  HeartPulse,
   Keyboard,
   Mail,
   Mic,
   NotebookPen,
   Pause as PauseIcon,
   Pin,
-  PinOff,
   Play,
   Plus,
   Radio,
+  RefreshCw,
   Share2,
   Square,
   Timer,
@@ -32,6 +36,8 @@ import {
   Users,
   VolumeX,
   Volume2,
+  Wifi,
+  WifiOff,
   Music,
 } from 'lucide-react';
 import {
@@ -45,7 +51,7 @@ import {
 import { AudioEngine } from '@/lib/audio-engine';
 import { LevelTester } from '@/lib/level-tester';
 import { LivekitPublisher } from '@/lib/livekit-publisher';
-import { operatorWsUrl, recordingHref } from '@/lib/orchestrator';
+import { fetchDeepHealth, operatorWsUrl, recordingHref, type DeepHealth } from '@/lib/orchestrator';
 import { cn } from '@/lib/cn';
 import { Button, CopyButton, Eyebrow, PhasePill, Stat } from '@/components/ui';
 import { Waveform } from '@/components/waveform';
@@ -120,6 +126,32 @@ export default function OperatorConsole() {
   /** Pinned moments — captions starred during the service for the report. */
   const [pinned, setPinned] = useState<PinnedMoment[]>([]);
 
+  /** Reliability state surfaced from the engine + orchestrator. */
+  const [rttMs, setRttMs] = useState<number | null>(null);
+  const [silenceGated, setSilenceGated] = useState(false);
+  const [restartingLang, setRestartingLang] = useState<{ lang: string; attempt: number; nextDelayMs: number } | null>(null);
+  const [tabHiddenAt, setTabHiddenAt] = useState<number | null>(null);
+
+  /** Pre-flight deep health: OpenAI + LiveKit reachability. */
+  const [health, setHealth] = useState<DeepHealth | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const refreshHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const h = await fetchDeepHealth();
+      setHealth(h);
+    } catch {
+      setHealth({
+        ok: false,
+        openai: { ok: false, latencyMs: 0, error: 'orchestrator unreachable' },
+        livekit: { ok: false, latencyMs: 0, error: 'orchestrator unreachable' },
+      });
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
+  useEffect(() => { void refreshHealth(); }, [refreshHealth]);
+
   /** Accumulates listener-minutes for the post-service report. */
   const listenerMinutesRef = useRef(0);
   const lastListenerSampleRef = useRef<number>(0);
@@ -178,6 +210,26 @@ export default function OperatorConsole() {
     const t = setInterval(() => setElapsedSec((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [phase]);
+
+  // Page Visibility — warn the operator when the tab is in the background
+  // during a live (non-rehearsal) service. Chrome throttles inactive tabs
+  // which can stall audio capture and starve WS heartbeats.
+  useEffect(() => {
+    if (phase !== 'live' || rehearsalMode) return;
+    function onVis() {
+      if (document.hidden) {
+        setTabHiddenAt(Date.now());
+        toast.warn(
+          'This tab is in the background',
+          'The browser may throttle audio capture. Bring this tab forward.',
+        );
+      } else {
+        setTabHiddenAt(null);
+      }
+    }
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [phase, rehearsalMode, toast]);
 
   // Rehearsal countdown — auto-stops at 0.
   useEffect(() => {
@@ -257,12 +309,24 @@ export default function OperatorConsole() {
       case 'listener.count':
         setListeners({ byLanguage: msg.byLanguage, total: msg.total });
         break;
+      case 'silence.gating':
+        setSilenceGated(msg.paused);
+        break;
+      case 'language.restart':
+        setRestartingLang({ lang: msg.language, attempt: msg.attempt, nextDelayMs: msg.nextDelayMs });
+        toast.warn(
+          `${LANGUAGES_BY_CODE[msg.language as LanguageCode]?.englishName ?? msg.language} translation hiccup`,
+          `Auto-recovering · attempt ${msg.attempt}`,
+        );
+        // Clear the indicator a couple seconds after the expected restart.
+        setTimeout(() => setRestartingLang(null), msg.nextDelayMs + 3000);
+        break;
       case 'error':
         setError(msg.message);
         toast.error('Error', msg.message);
         break;
     }
-  }, [elapsedSec, cost]);
+  }, [elapsedSec, cost, toast]);
 
   function applyCaption(frame: CaptionFrame) {
     setCaptionsByLang((prev) => ({ ...prev, [frame.language]: frame.text }));
@@ -290,6 +354,7 @@ export default function OperatorConsole() {
       onMessage: handleMessage,
       onInputLevel: (rms) =>
         setInputLevel((prev) => ({ rms, peak: Math.max(prev.peak * 0.97, rms) })),
+      onLatency: (ms) => setRttMs(ms),
     });
     engineRef.current = engine;
 
@@ -459,6 +524,10 @@ export default function OperatorConsole() {
         rehearsalMode={rehearsalMode}
         rehearsalSecLeft={rehearsalSecLeft}
         pinned={pinned}
+        rttMs={rttMs}
+        silenceGated={silenceGated}
+        restartingLang={restartingLang}
+        tabHiddenAt={tabHiddenAt}
         onPause={onPause}
         onResume={onResume}
         onStop={onStop}
@@ -521,6 +590,8 @@ export default function OperatorConsole() {
           <span className="mx-2 text-ink-700">→</span>
           {targetLangs.map((c) => LANGUAGES_BY_CODE[c].englishName).join(', ')}
         </p>
+
+        <PreflightStrip health={health} loading={healthLoading} onRetry={() => void refreshHealth()} />
       </header>
 
       {/* Progress rail */}
@@ -738,6 +809,10 @@ function OnAir(props: {
   rehearsalMode: boolean;
   rehearsalSecLeft: number;
   pinned: PinnedMoment[];
+  rttMs: number | null;
+  silenceGated: boolean;
+  restartingLang: { lang: string; attempt: number; nextDelayMs: number } | null;
+  tabHiddenAt: number | null;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
@@ -751,6 +826,7 @@ function OnAir(props: {
     inputLevel, inputStream, outputStreams, serviceId, cmdOpen, setCmdOpen,
     activeSpeakerId, setActiveSpeakerId, notes, setNotes,
     rehearsalMode, rehearsalSecLeft, pinned,
+    rttMs, silenceGated, restartingLang, tabHiddenAt,
     onPause, onResume, onStop, onAddCap, onPinMoment, toastSuccess,
   } = props;
 
@@ -862,10 +938,22 @@ function OnAir(props: {
             />
           )}
           <span className="readout text-sm text-ink-300">{fmtElapsed(elapsedSec)}</span>
-          {isSilent && !rehearsalMode && (
+          {silenceGated && !rehearsalMode && (
+            <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-100">
+              <VolumeX className="h-3 w-3" />
+              API paused · silent
+            </span>
+          )}
+          {!silenceGated && isSilent && !rehearsalMode && (
             <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-100">
               <VolumeX className="h-3 w-3" />
               Silent · {silentSec}s
+            </span>
+          )}
+          {restartingLang && (
+            <span className="hidden md:inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-100">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              Reconnecting {restartingLang.lang.toUpperCase()}
             </span>
           )}
           <div className="flex-1 min-w-0 truncate text-sm text-ink-300">
@@ -905,6 +993,12 @@ function OnAir(props: {
         {capWarning !== null && !capReached && capWarning >= 0.5 && (
           <div className="bg-amber-500/15 border-t border-amber-500/30 text-amber-100 text-xs px-5 py-1.5 text-center">
             {Math.round(capWarning * 100)}% of cost cap used.
+          </div>
+        )}
+        {tabHiddenAt && (
+          <div className="bg-amber-500/15 border-t border-amber-500/30 text-amber-100 text-xs px-5 py-1.5 text-center flex items-center justify-center gap-2">
+            <EyeOff className="h-3 w-3" />
+            This tab is in the background. Bring it forward — browsers throttle audio capture in inactive tabs.
           </div>
         )}
       </header>
@@ -1056,6 +1150,47 @@ function OnAir(props: {
               </ul>
             </div>
           )}
+
+          {/* Reliability card */}
+          <div className="card">
+            <Eyebrow className="mb-2 flex items-center gap-1.5">
+              <HeartPulse className="h-3 w-3 text-ink-500" /> Reliability
+            </Eyebrow>
+            <ul className="grid gap-2 text-xs text-ink-300">
+              <li className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5">
+                  {rttMs === null ? <WifiOff className="h-3 w-3 text-ink-500" /> : <Wifi className="h-3 w-3 text-emerald-400" />}
+                  Server latency
+                </span>
+                <span className="readout text-ink-200">
+                  {rttMs === null ? '—' : `${rttMs}ms`}
+                </span>
+              </li>
+              <li className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5">
+                  <Activity className="h-3 w-3 text-ink-500" />
+                  Audio forwarding
+                </span>
+                <span className={cn('text-[11px]', silenceGated ? 'text-sky-300' : 'text-emerald-300')}>
+                  {silenceGated ? 'paused (silence)' : 'live'}
+                </span>
+              </li>
+              {restartingLang && (
+                <li className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1.5">
+                    <RefreshCw className="h-3 w-3 animate-spin text-amber-300" />
+                    Reconnecting
+                  </span>
+                  <span className="text-[11px] text-amber-200">
+                    {LANGUAGES_BY_CODE[restartingLang.lang as LanguageCode]?.englishName ?? restartingLang.lang} · attempt {restartingLang.attempt}
+                  </span>
+                </li>
+              )}
+            </ul>
+            <p className="mt-2 text-[10px] text-ink-500 leading-relaxed">
+              Heartbeat to orchestrator every 10s. Translation auto-restarts on Realtime errors. Audio forwarding pauses on silence to save cost.
+            </p>
+          </div>
 
           {/* Speaker switcher */}
           {speakerOptions.length > 1 && (
@@ -1567,6 +1702,76 @@ function LevelMeter({
       {!compact && active && peakDb > -3 && (
         <p className="mt-1 text-[10px] text-red-300">Peaks near clipping — pull the aux send down a few dB.</p>
       )}
+    </div>
+  );
+}
+
+function PreflightStrip({
+  health, loading, onRetry,
+}: {
+  health: DeepHealth | null;
+  loading: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="mt-5 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 grid gap-2 sm:grid-cols-2">
+      <PreflightItem
+        label="OpenAI Realtime"
+        ok={health?.openai.ok ?? null}
+        loading={loading}
+        sub={
+          health?.openai.ok
+            ? `${health.openai.latencyMs}ms · credentials OK`
+            : health?.openai.error ?? 'checking…'
+        }
+      />
+      <PreflightItem
+        label="LiveKit Cloud"
+        ok={health?.livekit.ok ?? null}
+        loading={loading}
+        sub={
+          health?.livekit.ok
+            ? `${health.livekit.latencyMs}ms · room access OK`
+            : health?.livekit.error ?? 'checking…'
+        }
+      />
+      <div className="sm:col-span-2 flex items-center justify-between pt-2 border-t border-white/[0.04]">
+        <span className="text-[11px] text-ink-500 inline-flex items-center gap-1.5">
+          <HeartPulse className="h-3 w-3" />
+          {health?.ok ? 'Ready to go live' : 'Resolve before going live'}
+        </span>
+        <button
+          onClick={onRetry}
+          disabled={loading}
+          className="text-[11px] text-accent-300 hover:underline disabled:opacity-50 inline-flex items-center gap-1"
+        >
+          <RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} /> Re-check
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreflightItem({
+  label, ok, loading, sub,
+}: { label: string; ok: boolean | null; loading: boolean; sub: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className={cn(
+        'h-7 w-7 rounded-lg ring-1 grid place-items-center transition-colors',
+        ok === true ? 'bg-emerald-500/15 ring-emerald-500/40 text-emerald-300' :
+        ok === false ? 'bg-red-500/15 ring-red-500/40 text-red-300' :
+                       'bg-white/[0.04] ring-white/[0.06] text-ink-400',
+      )}>
+        {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> :
+         ok === true ? <Check className="h-3.5 w-3.5" /> :
+         ok === false ? <AlertTriangle className="h-3.5 w-3.5" /> :
+                        <Circle className="h-2 w-2 fill-current" />}
+      </span>
+      <div className="min-w-0">
+        <div className="text-sm text-ink-200 truncate">{label}</div>
+        <div className="text-[11px] text-ink-500 truncate">{sub}</div>
+      </div>
     </div>
   );
 }

@@ -16,6 +16,8 @@ export type OperatorMessage =
   | { type: 'resume'; }
   | { type: 'stop'; }
   | { type: 'cap.raise'; addUSD: number }
+  | { type: 'audio.silent'; silent: boolean }
+  | { type: 'ping'; ts: number }
   | { type: 'audio.meta'; sampleRate: number; channels: 1 | 2; codec: 'pcm16' | 'opus' };
 
 // ---- Orchestrator -> Operator (text frames) ----
@@ -48,4 +50,7 @@ export type OrchestratorMessage =
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; tMs: number }
   | { type: 'cap.warning'; capFraction: number }
   | { type: 'cap.reached'; }
+  | { type: 'pong'; ts: number }
+  | { type: 'silence.gating'; paused: boolean }
+  | { type: 'language.restart'; language: string; attempt: number; nextDelayMs: number }
   | { type: 'error'; message: string };
