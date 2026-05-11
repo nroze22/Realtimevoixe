@@ -87,6 +87,49 @@ languages, and on the next screen pick your audio input and click **Go live**.
 
 Open the QR / listener link on a second device or browser tab to hear it.
 
+## Two listener delivery paths
+
+Realtime Voice ships two ways to get translated audio into people's ears:
+
+### A) BYOD phones (default)
+
+Print or project the **join code** (e.g. `SVC-7K2L`) and **QR**. Congregants
+scan it with their phone camera, the listener PWA opens in their browser, they
+pick a language, plug in earbuds. ~250 ms WiFi latency. Scales to ~100
+listeners per AP on 5 GHz.
+
+### B) Existing FM / IR / Wi-Fi receiver headsets
+
+Many churches already own a Williams AV, Listen Tech, or Sennheiser
+MobileConnect transmitter and a stack of receiver bodypacks. Translation
+audio can be piped into those as if it were any other line-level source:
+
+1. From the operator console, copy the per-language **Broadcast output URL**
+   under "Headset broadcast outputs", e.g.
+   `https://your-host/broadcast/SVC-7K2L/es`.
+2. Open that URL on a laptop or mini-PC near your AV rack. The page keeps
+   the screen awake, auto-reconnects, and lets you pick which audio
+   **output** the page renders to.
+3. Wire that laptop's chosen output (3.5 mm, USB-C, or USB audio interface)
+   into the transmitter input:
+
+   | Transmitter | Typical input | Cable to use |
+   |-------------|---------------|--------------|
+   | Williams AV PPA T46 / T57 | mono ¼" line-in | 3.5 mm TRS → ¼" TRS |
+   | Listen Tech LT-800 / LK-7 | mono XLR or ¼" | USB audio interface → XLR-M |
+   | Sennheiser MobileConnect ConnectStation | line-level analog or Dante | USB → balanced TRS / Dante |
+   | Mixer aux return (any) | line-level XLR or TRS | USB audio interface → XLR/TRS |
+
+4. Trim levels at the transmitter, not the OS — keep the browser at 100%
+   volume and let the transmitter input gain control loudness so you don't
+   lose dynamic range.
+5. Repeat for each target language with its own laptop or output channel.
+
+For very large installs, run **one broadcast page per language** on a
+small headless Linux box (Chromium kiosk mode) near the rack. The pages
+auto-reconnect on network blips and never need manual intervention once
+the upstream service is started.
+
 ## Audio plumbing in production
 
 Easiest path for an AV team:

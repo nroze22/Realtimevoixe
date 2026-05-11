@@ -1,12 +1,28 @@
 'use client';
 
-import { Room, RoomEvent, type RemoteAudioTrack, type RemoteParticipant, Track } from 'livekit-client';
+import {
+  ConnectionQuality,
+  Room,
+  RoomEvent,
+  Track,
+  type RemoteAudioTrack,
+  type RemoteParticipant,
+} from 'livekit-client';
 import type { LanguageCode } from '@rtv/shared';
+
+export interface ListenerCaption {
+  kind: 'source' | 'target';
+  lang: LanguageCode;
+  text: string;
+  tMs: number;
+}
 
 export interface ListenerCallbacks {
   onConnected: (availableLanguages: LanguageCode[]) => void;
   onLanguagesChanged: (availableLanguages: LanguageCode[]) => void;
   onAudioTrack: (lang: LanguageCode, track: RemoteAudioTrack) => void;
+  onCaption: (caption: ListenerCaption) => void;
+  onConnectionQuality: (q: 'excellent' | 'good' | 'poor' | 'lost' | 'unknown') => void;
   onError: (msg: string) => void;
   onDisconnected: () => void;
 }
@@ -41,7 +57,24 @@ export class ListenerSession {
     });
 
     room.on(RoomEvent.Disconnected, () => this.cb.onDisconnected());
-    room.on(RoomEvent.ConnectionStateChanged, () => {/* could surface to UI */});
+    room.on(RoomEvent.ConnectionQualityChanged, (quality) => {
+      this.cb.onConnectionQuality(translateQuality(quality));
+    });
+
+    room.on(RoomEvent.DataReceived, (payload) => {
+      try {
+        const text = new TextDecoder().decode(payload);
+        const msg = JSON.parse(text);
+        if (msg?.t === 'caption' && typeof msg.text === 'string') {
+          this.cb.onCaption({
+            kind: msg.kind === 'source' ? 'source' : 'target',
+            lang: msg.lang as LanguageCode,
+            text: msg.text,
+            tMs: typeof msg.tMs === 'number' ? msg.tMs : 0,
+          });
+        }
+      } catch {/* noop */}
+    });
 
     await room.connect(url, token);
 
@@ -88,4 +121,14 @@ export class ListenerSession {
 function parseLangFromName(name: string): LanguageCode | null {
   if (!name.startsWith('translation-')) return null;
   return name.slice('translation-'.length) as LanguageCode;
+}
+
+function translateQuality(q: ConnectionQuality): 'excellent' | 'good' | 'poor' | 'lost' | 'unknown' {
+  switch (q) {
+    case ConnectionQuality.Excellent: return 'excellent';
+    case ConnectionQuality.Good:      return 'good';
+    case ConnectionQuality.Poor:      return 'poor';
+    case ConnectionQuality.Lost:      return 'lost';
+    default:                          return 'unknown';
+  }
 }

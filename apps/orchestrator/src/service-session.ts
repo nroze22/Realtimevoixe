@@ -15,7 +15,7 @@ import {
 } from '@rtv/shared';
 import { TranslateSession } from './realtime-session.js';
 import { env } from './env.js';
-import { listenerCounts } from './livekit.js';
+import { listenerCounts, broadcastData } from './livekit.js';
 import { ServiceRecorder } from './recorder.js';
 import { log } from './log.js';
 
@@ -125,34 +125,45 @@ export class ServiceSession extends EventEmitter {
       if (!delta && !isFinal) return;
       const prev = this.lastCaptionByLang.get(lang) ?? '';
       const text = isFinal ? prev : prev + delta;
+      const tMs = Date.now() - this.startedAt;
       if (isFinal) {
         this.lastCaptionByLang.set(lang, '');
-        this.recorder.appendCaption('target', lang, this.now(), prev);
+        this.recorder.appendCaption('target', lang, tMs, prev);
+        // Broadcast only finalized lines to listeners; partials would just
+        // thrash the screen on phones.
+        if (prev.trim()) {
+          void broadcastData(this.state.livekitRoomName, {
+            t: 'caption',
+            kind: 'target',
+            lang,
+            text: prev,
+            tMs,
+          });
+        }
       } else {
         this.lastCaptionByLang.set(lang, text);
       }
-      const frame: CaptionFrame = {
-        kind: 'target',
-        language: lang,
-        text,
-        isFinal,
-        tMs: Date.now() - this.startedAt,
-      };
+      const frame: CaptionFrame = { kind: 'target', language: lang, text, isFinal, tMs };
       this.sendToOperator({ type: 'caption', frame });
     });
 
     ts.on('sourceText', (delta, isFinal) => {
       if (this.sourceCaptionsOwner !== lang) return;
+      const tMs = this.now();
+      const srcLang = this.config.sourceLanguage as LanguageCode;
       if (isFinal) {
         this.sourceBuffer = '';
-        this.recorder.appendCaption('source', this.config.sourceLanguage as LanguageCode, this.now(), delta);
-        const frame: CaptionFrame = {
-          kind: 'source',
-          language: this.config.sourceLanguage as LanguageCode,
-          text: delta,
-          isFinal: true,
-          tMs: this.now(),
-        };
+        this.recorder.appendCaption('source', srcLang, tMs, delta);
+        if (delta.trim()) {
+          void broadcastData(this.state.livekitRoomName, {
+            t: 'caption',
+            kind: 'source',
+            lang: srcLang,
+            text: delta,
+            tMs,
+          });
+        }
+        const frame: CaptionFrame = { kind: 'source', language: srcLang, text: delta, isFinal: true, tMs };
         this.sendToOperator({ type: 'caption', frame });
         return;
       }

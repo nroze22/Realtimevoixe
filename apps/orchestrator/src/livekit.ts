@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient, DataPacket_Kind } from 'livekit-server-sdk';
 import { env } from './env.js';
 
 let _roomService: RoomServiceClient | null = null;
@@ -64,6 +64,21 @@ export async function deleteRoom(roomName: string): Promise<void> {
     await roomService().deleteRoom(roomName);
   } catch {
     // ignore
+  }
+}
+
+/**
+ * Send a data packet to every participant in the room. Used to deliver
+ * live captions to listener PWAs over the same LiveKit pipe they're already
+ * receiving audio on — no extra WS or polling needed.
+ */
+export async function broadcastData(roomName: string, payload: unknown): Promise<void> {
+  try {
+    const json = JSON.stringify(payload);
+    const bytes = new TextEncoder().encode(json);
+    await roomService().sendData(roomName, bytes, DataPacket_Kind.RELIABLE);
+  } catch {
+    // The room may not exist yet, or there may be no listeners. Either is fine.
   }
 }
 
